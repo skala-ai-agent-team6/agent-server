@@ -1,0 +1,9 @@
+{
+  "task_id": "demo-1",
+  "case_id": "100",
+  "symptom": "왼쪽 바퀴가 움직이지 않습니다",
+  "attachments": [
+    {"id": "photo-1", "target": "MOTOR", "object_key": "mock/motor.jpg", "mock_readable": false}
+  ],
+  "mock_order_required": true
+}
