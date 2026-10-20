@@ -5,7 +5,8 @@ Spring에서 Kafka로 전달한 수리 접수를 받아, LangGraph로 사진 분
 이 브랜치는 팀의 [`skeleton-agent@104df49`](https://github.com/skala-ai-agent-team6/skeleton-agent/tree/104df49)를 바탕으로 MCP 연결과 실행 제어를 추가한 **통합 개발 버전**입니다. 원본의 9개 노드·분기·판단 함수를 유지하며, 실제 워커가 이 그래프를 실행합니다. 통합과 일부 실제 연동 검증은 끝났지만, 진단 판단 개선과 교재 하네스 전체 구현은 남아 있습니다.
 
 - 작업 브랜치: `feat/harness-hardening` — 통합 커밋 `3517604`에서 분기한 로컬 하네스 작업입니다.
-- 1단계 변경·검증: [도구 실패 처리](HARNESS_STEP1.md). 사용자 확인 전 푸시하지 않습니다.
+- 1단계 [도구 실패 처리](HARNESS_STEP1.md)는 `6faafbb`로 푸시했습니다.
+- 2단계 [프롬프트 분리·버전 관리](HARNESS_STEP2.md)는 실제 Spring·Kafka·모델·MCP·LLM·DB·SSE 검증까지 완료했습니다. 사용자 승인된 2단계 변경입니다.
 - 상세 변경 내역·MD 2개 대조·검증 기록: [통합 현황](INTEGRATION_STATUS.md)
 - Spring/Kafka 계약: [연동 계약](contract/INTEGRATION.md)
 - 아래 현황은 **2026-10-20 점검 기준**입니다.
@@ -87,7 +88,7 @@ Spring에서 Kafka로 전달한 수리 접수를 받아, LangGraph로 사진 분
 
 | 교재 항목 | 현재 구현 | 남은 구현 | 상태 |
 | --- | --- | --- | --- |
-| Instructions | 코드 내부 역할·출력 지시 | 프롬프트 파일 분리, 버전 관리·변경 평가 | 부분 |
+| Instructions | 프롬프트 3종 파일 분리, 버전·해시 검증, 실행 스냅샷·사용 기록 | 문구 변경 시 품질 평가, 팀 MCP 내부 프롬프트는 별도 관리 | 2단계 보완 |
 | Tools | MCP 연결, 일부 RAG 길이 제한, 오류 결과 수집 | 도구별 결과 크기 제한, 일관된 오류 형식 | 부분 |
 | Agent Loop | 추가 요청 3회, `recursion_limit=20`, 호출·시간 상한 | 교재의 턴/동일 도구 반복 기준과 현재 정책 대응 정리 | 부분 |
 | Context | 소견·분석·검색 근거 전달 | 토큰 예산, 오래된 문맥 요약·잘라내기 | 미완료 |
@@ -103,7 +104,7 @@ Spring에서 Kafka로 전달한 수리 접수를 받아, LangGraph로 사진 분
 
 ## 다음 개발 순서
 
-1. 도구 실패 정책 1단계 검토 후 남은 하네스: 프롬프트 분리, 실행 한도 보완, 토큰·문맥·PII 관리, 상태 복원과 추적.
+1. 프롬프트 분리 2단계 검토 후 남은 하네스: 실행 한도 보완, 토큰·문맥·PII 관리, 상태 복원과 추적.
 2. 판단 기능: 낮은 확신·근거 부족 평가, 상황에 맞는 추가 사진/설명 요청.
 3. 최신 RAG·업무 MCP 응답 필드를 연결하고 리포트에 반영.
 4. 같은 평가셋과 실제 통합 시나리오로 최종 JSON·리포트·Spring 표시를 재검증.
@@ -184,7 +185,7 @@ uv run python -m worker.e2e_check --scenario retry-limit
 | 파일 | 내용 |
 | --- | --- |
 | `worker/reports/task-<taskId>_revision-<revision>_고장리포트.md` | 사람이 읽는 리포트 |
-| 같은 이름의 `.json` | 입력 `command`와 최종 `result` |
+| 같은 이름의 `.json` | 입력 `command`, 최종 `result`, 실행 통계·사용 프롬프트 `execution` |
 | `worker/reports/live-summary.json` | 단독 실제 모델 검증 결과 |
 | `worker/reports/e2e-*-summary.json` | Spring/Kafka 시나리오 결과 |
 | `.local/logs/agent.jsonl` | 실행·도구·재시도 로그 |
@@ -201,10 +202,10 @@ open worker/reports
 
 | 검증 | 결과 | 범위 |
 | --- | --- | --- |
-| Agent 회귀·하네스 테스트 | 하네스 1단계 기준 59개 통과 | 테스트 대역 사용, 정확도 평가 아님 |
-| Spring/Kafka 혼합 분석 | PCB 2장 + 기계 1장, 최종 JSON·리포트·DB·SSE 확인 | 실제 모델·MCP·LLM |
+| Agent 회귀·하네스 테스트 | 하네스 2단계 기준 68개 통과 | 테스트 대역 사용, 정확도 평가 아님 |
+| Spring/Kafka 혼합·기계 단독 분석 | 2단계 코드로 접수 19·20 검증, JSON·리포트·DB·SSE 확인 | 실제 모델·MCP·LLM |
 | 찌그러짐 분석 | `roof-dent` → 파손 해석 → 리포트 확인 | 실제 모델·MCP·LLM |
-| 추가 요청 상한 | 초기 + 추가 3회 후 실패, 4차 요청 없음 | 실제 통합 시나리오 |
+| 추가 요청 상한 | 2단계 코드로 접수 21 검증. 초기 + 추가 3회 후 실패, 4차 요청 없음 | 실제 Spring/Kafka 통합 시나리오 |
 | 업무 연결 | 추천 부품 → 재고 조회 → 조달 제안·승인 → 시험 주문 취소 | 개발 DB·가상 재고, 실제 MCP |
 | 해석/RAG 연결 | 4개 서버 7개 도구 호출 | 제공한 시험 라벨·검색어 |
 | 백엔드 | 별도 저장소 테스트 25개 및 11장 접수 거절 확인 | 백엔드 로컬 변경 포함 |
@@ -222,5 +223,6 @@ open worker/reports
 | `worker/journal.py` | SQLite 상태·이벤트 저장·중복/재접수 검증 |
 | `worker/observability.py` | 구조화 로그 |
 | `worker/report.py` | JSON·Markdown 저장 |
+| `prompts/`, `worker/prompts.py` | 프롬프트 파일·manifest·실행별 버전 기록 |
 | `worker/business_gateway.py` | Spring 재고 요청을 업무 MCP에 맞게 변환 |
 | `tests/`, `worker/*check*.py`, `worker/verify_live.py` | 회귀·실제 연결 검증 |

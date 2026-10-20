@@ -13,6 +13,7 @@ from fastmcp.client.transports import StdioTransport
 from pydantic import BaseModel, Field, field_validator
 
 from . import config as C
+from .prompts import render
 from .harness import guarded
 from .tool_policy import check_image_result, check_object, check_response
 
@@ -160,7 +161,7 @@ async def classify_photo(path: str) -> str:
         return "PCB" if "pcb" in Path(path).name else "MECH"  # 키 없을 때: 파일 이름으로
     b64 = base64.b64encode(Path(path).read_bytes()).decode()
     msg = [{"role": "user", "content": [
-        {"type": "text", "text": "로봇청소기 수리용 부품 사진이다. 흑백·확대 사진일 수 있다. PCB / MECH / OTHER 중 하나로 분류해라."},
+        {"type": "text", "text": render("classify_photo", PhotoKind)},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
     ]}]
     return (await gpt(PhotoKind).ainvoke(msg)).kind
@@ -173,7 +174,7 @@ async def split_text(text: str) -> Clues:
         return Clues(pcb=[w for w in ("전원", "충전", "회로") if w in text],
                      mech=[w for w in ("바퀴", "모터", "브러시", "소음") if w in text],
                      sw=[w for w in ("펌웨어", "앱", "업데이트") if w in text])
-    return await gpt(Clues).ainvoke(f"로봇청소기 고장 증상을 단서별로 나눠라. 없으면 빈 목록.\n증상: {text}")
+    return await gpt(Clues).ainvoke(render("split_text", Clues, text=text))
 
 
 @guarded()
@@ -184,13 +185,8 @@ async def write_report(text: str, findings: list[dict], compatible_parts=None) -
         top = max(defects, key=lambda d: d["confidence"])
         return Report(summary=f"{top['type']} 결함 추정", repairMethod="해당 부품 점검 후 교체",
                       candidates=[Candidate(cause=top["type"], confidence=top["confidence"], explanation="MCP 검출 결과")])
-    result = await gpt(Report).ainvoke(
-        "로봇청소기 수리 기사에게 줄 진단 리포트를 한국어로 써라. 후보는 확신도 높은 순.\n"
-        "MCP 결과는 전부 이 로봇청소기 부품 사진을 검사한 결과다. 무시하지 말고 근거로 써라.\n"
-        "단, 해석 MCP가 도메인 불일치로 표시한 자동차 부위는 청소기의 부위·고장 원인으로 제시하지 마라. "
-        "모델 검출 점수나 RAG 유사도는 실제 고장 확률이 아니다. 원인 확정에는 추가 점검이 필요하다고 명시하라.\n"
-        "추천 부품은 제공된 호환 부품의 id만 사용하라. 목록이 없거나 교체 근거가 없으면 빈 배열.\n"
-        f"호환 부품: {compatible_parts or []}\n증상: {text}\nMCP 결과: {findings}")
+    result = await gpt(Report).ainvoke(render(
+        "write_report", Report, compatible_parts=compatible_parts or [], text=text, findings=findings))
     allowed = {str(p["id"]) for p in compatible_parts or []}
     identifiers = [p.partId for p in result.recommendedParts]
     if not set(identifiers) <= allowed or len(set(identifiers)) != len(identifiers):

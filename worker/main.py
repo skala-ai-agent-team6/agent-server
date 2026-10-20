@@ -24,6 +24,7 @@ GRAPH = build_graph()
 from . import harness
 from .journal import Journal, CommandConflict
 from .tool_policy import RequiredToolFailure
+from .prompts import PromptConfigError
 from jsonschema.exceptions import ValidationError
 
 
@@ -67,6 +68,7 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
                 code = ("GRAPH_STEP_LIMIT" if isinstance(exc, GraphRecursionError) else
                         "EXECUTION_LIMIT" if isinstance(exc, harness.LimitExceeded) else
                         "REQUIRED_TOOL_FAILED" if isinstance(exc, RequiredToolFailure) else
+                        "PROMPT_CONFIG_ERROR" if isinstance(exc, PromptConfigError) else
                         "RUN_TIMEOUT" if isinstance(exc, TimeoutError) else "AGENT_ERROR")
                 result = {"eventType": "DIAGNOSIS_FAILED", "payload": {"errorCode": code}}
                 journal.finish(command, result)
@@ -75,10 +77,17 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
                     journal.db.execute("CREATE TABLE IF NOT EXISTS executions (event_id TEXT PRIMARY KEY, metrics TEXT NOT NULL)")
                     journal.db.execute("INSERT OR REPLACE INTO executions VALUES (?,?)",
                                        (command["eventId"], json.dumps(metrics)))
-        path = report.save(command, result)
+        # 재전송 시 현재 프롬프트 버전을 덧씌우지 않고 원래 실행 기록을 사용한다.
+        execution = {}
+        if journal.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='executions'").fetchone():
+            row = journal.db.execute("SELECT metrics FROM executions WHERE event_id=?",
+                                     (command["eventId"],)).fetchone()
+            if row:
+                execution = json.loads(row[0])
+        path = report.save(command, result, execution=execution)
         await flush(journal, command, producer)
         if result["payload"].get("errorCode") in ("AGENT_ERROR", "GRAPH_STEP_LIMIT", "EXECUTION_LIMIT",
-                                                "RUN_TIMEOUT", "REQUIRED_TOOL_FAILED"):
+                                                "RUN_TIMEOUT", "REQUIRED_TOOL_FAILED", "PROMPT_CONFIG_ERROR"):
             await producer.send_and_wait(C.DLT_TOPIC, json.dumps(command).encode(), key=command["taskId"].encode())
         log.info("task %s → %s (리포트: %s)", command["taskId"], result["eventType"], path)
         return result

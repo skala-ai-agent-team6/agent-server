@@ -13,7 +13,7 @@ OUT = C.HERE / "reports"
 TITLE = {"DIAGNOSIS_COMPLETED": "진단 완료", "PHOTO_REQUESTED": "추가 사진 요청", "DIAGNOSIS_FAILED": "진단 실패"}
 
 
-def save(command: dict, result: dict) -> Path:
+def save(command: dict, result: dict, execution=None) -> Path:
     repair = command["payload"]["repair"]
     p = result["payload"]
     lines = [
@@ -52,10 +52,19 @@ def save(command: dict, result: dict) -> Path:
         if p["errorCode"] == "REQUIRED_TOOL_FAILED":
             lines += ["- 필수 이미지 분석 도구가 실패했습니다. 결함 없음이나 정상 판정이 아닙니다.",
                       "- 도구 상태를 복구한 뒤 재진단이 필요합니다."]
+        if p["errorCode"] == "PROMPT_CONFIG_ERROR":
+            lines += ["- 프롬프트 파일·버전 정보가 유효하지 않아 분석을 시작하지 않았습니다."]
+
+    if execution and execution.get("prompts"):
+        lines += ["", "## 실행에 사용한 프롬프트", "",
+                  "| 단계 | 버전 | SHA-256 | 모델 |", "| --- | --- | --- | --- |"]
+        for name, meta in sorted(execution["prompts"].items()):
+            lines.append(f"| {name} | {meta['version']} | {meta['sha256']} | {meta['model']} |")
 
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"task-{command['taskId']}_revision-{command['inputRevision']}_고장리포트.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.with_suffix(".json").write_text(json.dumps(
-        {"command": command, "result": result}, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+        {"command": command, "result": result, "execution": execution or {}},
+        ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     return path

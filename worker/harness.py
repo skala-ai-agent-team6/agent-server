@@ -28,6 +28,8 @@ class Budget:
     event_id: str
     call_limit: int
     context: dict = field(default_factory=dict)
+    prompt_bundle: dict | None = None
+    prompt_versions: dict = field(default_factory=dict)
     calls: int = 0
     retries: int = 0
     started: float = field(default_factory=monotonic)
@@ -115,13 +117,16 @@ async def invoke(graph, command, emit, metrics=None):
     budget.context = context(command)
     token = current.set(budget)
     try:
+        from .prompts import load_bundle
+        budget.prompt_bundle = load_bundle()
         async with asyncio.timeout(C.RUN_TIMEOUT):
             return await graph.ainvoke({"command": command},
                                       {"recursion_limit": C.RECURSION_LIMIT,
                                        "configurable": {"emit": emit}})
     finally:
         values = {"calls": budget.calls, "retries": budget.retries,
-                  "duration_ms": round((monotonic()-budget.started)*1000), "call_limit": budget.call_limit}
+                  "duration_ms": round((monotonic()-budget.started)*1000), "call_limit": budget.call_limit,
+                  "prompts": budget.prompt_versions}
         if metrics is not None:
             metrics.update(values)
         record("run.finished", **values)

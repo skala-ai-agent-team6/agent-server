@@ -1,0 +1,23 @@
+{
+  "bundle_version": "1.0.0",
+  "prompts": {
+    "classify_photo": {
+      "file": "classify_photo.md",
+      "version": "1.0.0",
+      "sha256": "afbd11cd7a087b3d43d26cb4dde58a1a7c587031ef6631d43ea0322a2a5c889b",
+      "output_schema": "PhotoKind"
+    },
+    "split_text": {
+      "file": "split_text.md",
+      "version": "1.0.0",
+      "sha256": "57e2491f8cc7ee1391ade45a2998adda10bfc86ba817526fbec48b8724d717f8",
+      "output_schema": "Clues"
+    },
+    "write_report": {
+      "file": "write_report.md",
+      "version": "1.0.0",
+      "sha256": "efdfe415b4df11f85d830d5fb555757c213b1c6b0c7b27495fcb2fdbd8a64098",
+      "output_schema": "Report"
+    }
+  }
+}
