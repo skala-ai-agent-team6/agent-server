@@ -54,12 +54,31 @@ def save(command: dict, result: dict, execution=None) -> Path:
                       "- 도구 상태를 복구한 뒤 재진단이 필요합니다."]
         if p["errorCode"] == "PROMPT_CONFIG_ERROR":
             lines += ["- 프롬프트 파일·버전 정보가 유효하지 않아 분석을 시작하지 않았습니다."]
+        limits = {
+            "TOOL_CALL_LIMIT": "실행 전체의 도구 호출 예산을 초과했습니다.",
+            "TOOL_REPEAT_LIMIT": "동일 도구·동일 입력의 호출 시도 한도를 초과했습니다.",
+            "NODE_EXECUTION_LIMIT": "그래프 노드 실행 횟수 한도를 초과했습니다.",
+            "GRAPH_STEP_LIMIT": "LangGraph super-step 한도를 초과했습니다.",
+            "RUN_TIMEOUT": "이벤트 전체 실행 시간 한도를 초과했습니다.",
+            "TOOL_TIMEOUT": "개별 도구 호출 시간 초과가 재시도 후에도 해결되지 않았습니다.",
+        }
+        if p["errorCode"] in limits:
+            lines += ["- " + limits[p["errorCode"]], "- 실행 제한에 따른 종료이며 정상 판정이 아닙니다."]
 
     if execution and execution.get("prompts"):
         lines += ["", "## 실행에 사용한 프롬프트", "",
                   "| 단계 | 버전 | SHA-256 | 모델 |", "| --- | --- | --- | --- |"]
         for name, meta in sorted(execution["prompts"].items()):
             lines.append(f"| {name} | {meta['version']} | {meta['sha256']} | {meta['model']} |")
+    if execution and execution.get("limits"):
+        limits = execution["limits"]
+        lines += ["", "## 실행 한도 확인", "",
+                  f"- 가중 호출 수: {execution['calls']} / {limits['weighted_calls']}",
+                  f"- 노드 실행 수: {execution['node_executions']} / {limits['node_executions']}",
+                  f"- 동일 입력 최대 시도: {execution['max_same_input_attempts_used']} / {limits['same_input_attempts']}",
+                  f"- 실행 시간: {execution['duration_ms'] / 1000:.3f}초 / {limits['run_seconds']}초"]
+        for hit in execution.get("limits_hit", []):
+            lines.append(f"- 초과한 한도: {hit['code']}")
 
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"task-{command['taskId']}_revision-{command['inputRevision']}_고장리포트.md"

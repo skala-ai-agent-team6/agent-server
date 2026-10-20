@@ -49,6 +49,8 @@ TOOL_TIMEOUT = float(os.getenv("TOOL_TIMEOUT", "90"))
 RUN_TIMEOUT = float(os.getenv("RUN_TIMEOUT", "1800"))
 MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "2000"))
 RECURSION_LIMIT = int(os.getenv("RECURSION_LIMIT", "20"))
+MAX_NODE_EXECUTIONS = int(os.getenv("MAX_NODE_EXECUTIONS", "20"))
+MAX_SAME_INPUT_ATTEMPTS = int(os.getenv("MAX_SAME_INPUT_ATTEMPTS", "3"))
 STATE_PATH = Path(os.getenv("AGENT_STATE_PATH", str(ROOT / ".local/integration.sqlite3")))
 KAFKA_MAX_POLL_INTERVAL_MS = max(
     int((RUN_TIMEOUT + 180) * 1000),

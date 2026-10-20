@@ -21,7 +21,7 @@ def dent_labels(output):
     return [{"damage_type": "dent", "part": p} for p in dict.fromkeys(parts) if p in DENT_PARTS]
 
 
-@guarded()
+@guarded(name_arg="name")
 async def call(url, name, arguments):
     async with Client(url, timeout=C.TOOL_TIMEOUT) as client:
         response = await client.call_tool(name, arguments)

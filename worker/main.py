@@ -66,9 +66,10 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
             except Exception as exc:
                 log.error("진단 실행 실패: %s", type(exc).__name__)
                 code = ("GRAPH_STEP_LIMIT" if isinstance(exc, GraphRecursionError) else
-                        "EXECUTION_LIMIT" if isinstance(exc, harness.LimitExceeded) else
+                        exc.code if isinstance(exc, harness.LimitExceeded) else
                         "REQUIRED_TOOL_FAILED" if isinstance(exc, RequiredToolFailure) else
                         "PROMPT_CONFIG_ERROR" if isinstance(exc, PromptConfigError) else
+                        "TOOL_TIMEOUT" if isinstance(exc, harness.ToolCallTimeout) else
                         "RUN_TIMEOUT" if isinstance(exc, TimeoutError) else "AGENT_ERROR")
                 result = {"eventType": "DIAGNOSIS_FAILED", "payload": {"errorCode": code}}
                 journal.finish(command, result)
@@ -86,8 +87,8 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
                 execution = json.loads(row[0])
         path = report.save(command, result, execution=execution)
         await flush(journal, command, producer)
-        if result["payload"].get("errorCode") in ("AGENT_ERROR", "GRAPH_STEP_LIMIT", "EXECUTION_LIMIT",
-                                                "RUN_TIMEOUT", "REQUIRED_TOOL_FAILED", "PROMPT_CONFIG_ERROR"):
+        if result["payload"].get("errorCode") in harness.LIMIT_CODES | {
+                "AGENT_ERROR", "GRAPH_STEP_LIMIT", "REQUIRED_TOOL_FAILED", "PROMPT_CONFIG_ERROR", "TOOL_TIMEOUT"}:
             await producer.send_and_wait(C.DLT_TOPIC, json.dumps(command).encode(), key=command["taskId"].encode())
         log.info("task %s → %s (리포트: %s)", command["taskId"], result["eventType"], path)
         return result

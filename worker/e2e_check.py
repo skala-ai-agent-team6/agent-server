@@ -1,6 +1,7 @@
 """전용 로컬 Spring/Kafka/실제 MCP·모델·LLM 통합 검증. 접수 데이터를 생성한다."""
 import argparse
 import json
+import hashlib
 import os
 import sqlite3
 import time
@@ -22,12 +23,19 @@ def main():
     mech = C.HERE / 'samples/mech_sample.jpg'
     if args.scenario == 'retry-limit':
         import struct, zlib
-        blank = C.ROOT / '.local/blank.png'
+        blank_photos = []
         def chunk(kind, data):
             return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
-        blank.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 640, 640, 8, 2, 0, 0, 0))
-                          + chunk(b'IDAT', zlib.compress((b'\x00' + b'\xff' * 1920) * 640)) + chunk(b'IEND', b''))
-        photos = [(blank, 'PCB')]
+        # 추가 사진 내용이 바뀌어도 작업 전체의 재입력 3회 제한이 유지되는지 검증한다.
+        (C.ROOT / '.local').mkdir(exist_ok=True)
+        for index in range(4):
+            blank = C.ROOT / f'.local/blank-round-{index}.png'
+            width = 640 + index
+            blank.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, 640, 8, 2, 0, 0, 0))
+                              + chunk(b'IDAT', zlib.compress((b'\x00' + b'\xff' * (width * 3)) * 640)) + chunk(b'IEND', b''))
+            blank_photos.append(blank)
+        assert len({hashlib.sha256(p.read_bytes()).hexdigest() for p in blank_photos}) == 4
+        photos = [(blank_photos[0], 'PCB')]
     elif args.scenario == 'dent':
         photos = [(Path(os.environ['DENT_TEST_IMAGE']).resolve(), 'MOTOR')]
     elif args.scenario == 'pcb':
@@ -83,7 +91,7 @@ def main():
         assert rounds <= 3
         detail = client.get(f'/api/repairs/{repair}').json()
         request = next(r for r in detail['photoRequests'] if r['submitted_at'] is None)
-        p, target = photos[0]
+        p, target = blank_photos[rounds], 'PCB'
         response = client.post(f'/api/repairs/{repair}/attachments', params={'requestId': request['id'], 'target': target},
                                files={'file': (p.name, p.read_bytes(), 'image/png')})
         response.raise_for_status(); added = response.json()['attachmentId']
@@ -113,6 +121,7 @@ def main():
         assert any(e['payload']['tool'] == 'interpret_damage' for e in tools)
     summary = {'scenario': args.scenario, 'status': expected, 'task_id': task, 'repair_id': repair,
                'additional_requests': rounds, 'initial_photos': len(photos), 'sse_events': events,
+               'different_additional_photos': args.scenario == 'retry-limit',
                'progress_received_while_running': True, 'tool_calls': [e['payload']['tool'] for e in tools],
                'tool_errors': errors, 'report_files': [str(p.resolve()) for p in files],
                'scope': 'real Spring/Kafka/Agent/MCP/RAG/LLM; local dev users and seeded product data'}
