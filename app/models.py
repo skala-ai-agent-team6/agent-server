@@ -1,7 +1,7 @@
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Domain = Literal["PCB", "MECHANICAL", "SW"]
+Domain = Literal["PCB", "MECHANICAL"]
 
 
 class Contract(BaseModel):

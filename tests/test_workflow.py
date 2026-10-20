@@ -133,7 +133,7 @@ def test_natural_language_only_and_text_only_additional_input():
     c = TestClient(create_app())
     data = {**request(), 'symptom': '업데이트 이후 멈춤', 'attachments': []}
     result = c.post('/internal/events', json=data).json()
-    assert result['selected'] == ['SW']
+    assert result['selected'] == []
     assert result['status'] == 'WAITING_INPUT'
     update = {**data, 'event_type': 'ADDITIONAL_INPUT_SUBMITTED', 'event_id': 'text-update',
               'round_no': 1, 'symptom': '업데이트 이후 시작 버튼을 누르면 멈춤'}
@@ -162,3 +162,14 @@ def test_duplicate_photo_ids_rejected():
     data['attachments'] *= 2
     c = TestClient(create_app())
     assert c.post('/internal/events', json=data).status_code == 422
+
+
+def test_software_words_do_not_add_analysis_branch_and_rag_is_used():
+    c = TestClient(create_app())
+    data = {**request(), 'symptom': '업데이트 이후 SW 오류가 의심됩니다'}
+    result = c.post('/internal/events', json=data).json()
+    assert result['status'] == 'SUCCEEDED'
+    assert result['selected'] == ['MECHANICAL']
+    names = [e['tool_name'] for e in result['executions']]
+    assert names == ['analyze_mechanical', 'search_manual']
+    assert result['report']['candidates'][0]['evidence']['manuals']

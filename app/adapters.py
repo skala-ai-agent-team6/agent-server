@@ -15,8 +15,6 @@ class MockTools:
         latest = photos[-1] if photos else None
         sufficient = bool(latest and latest["mock_readable"])
         confidence = latest["mock_confidence"] if sufficient else 0.0
-        if domain == "SW":
-            sufficient = False  # 자연어를 에러 코드로 지어내지 않는다. 실제 SW 규격 미정.
         return {
             "domain": domain,
             "sufficient": sufficient,

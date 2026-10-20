@@ -33,10 +33,8 @@ def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2,
     def route(state):
         req = state["request"]
         # 입력 부위는 기사에게 받는다. 사진 종류를 LLM으로 재분류하지 않는다.
-        # 자연어 단서 추출은 임시 키워드 규칙이며 이후 구조화 출력으로 교체한다.
+        # 기사 소견은 분석 도구와 RAG 검색에 전달한다. 별도 SW 분석 분기는 없다.
         selected = {a["target"] for a in req["attachments"]}
-        if any(w in req["symptom"].lower() for w in ("sw", "펌웨어", "업데이트", "소프트웨어")):
-            selected.add("SW")
         return {"selected": sorted(selected), "status": "RUNNING"}
 
     def analyze(state):
@@ -110,7 +108,6 @@ def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2,
         instructions = {
             "PCB": "PCB 기판 전체와 결함 의심 부위를 선명하게 촬영해주세요.",
             "MECHANICAL": "찌그러짐 등 의심 부위의 전체와 근접 사진을 제출해주세요.",
-            "SW": "증상 발생 시점·업데이트 여부·재현 절차를 추가로 설명해주세요.",
             "GENERAL": "분석할 부위의 사진과 구체적인 증상을 추가해주세요.",
         }
         return {"photo_request_count": count, "status": "WAITING_INPUT",

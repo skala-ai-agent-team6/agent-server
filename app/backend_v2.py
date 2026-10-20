@@ -111,7 +111,7 @@ def to_backend_events(command: BackendCommand, result: dict) -> list[dict]:
         if execution["event_id"] != str(command.eventId) or execution["status"] != "SUCCEEDED":
             continue
         name = execution["tool_name"]
-        agent = {"analyze_pcb": "PCB", "analyze_mechanical": "MOTOR", "analyze_sw": "SW"}.get(name, "RAG")
+        agent = {"analyze_pcb": "PCB", "analyze_mechanical": "MOTOR"}.get(name, "RAG")
         emit("TOOL_EXECUTED", {"tool": name, "toolVersion": "mock-v1", "modelVersion": "mock-v1",
                                "agentType": agent, "mcpServer": "mock", "output": execution["output"]})
     if result["status"] == "WAITING_INPUT":
