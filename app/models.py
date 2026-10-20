@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.limits import MAX_ADDITIONAL_REQUESTS
 
 Domain = Literal["PCB", "MECHANICAL"]
 
@@ -22,7 +23,7 @@ class DiagnosisEvent(Contract):
     event_type: Literal["DIAGNOSIS_REQUESTED", "ADDITIONAL_INPUT_SUBMITTED"]
     task_id: str = Field(min_length=1)
     case_id: str = Field(min_length=1)
-    round_no: int = Field(default=0, ge=0, le=3)
+    round_no: int = Field(default=0, ge=0, le=MAX_ADDITIONAL_REQUESTS)
     symptom: str = Field(min_length=1)  # 기사 소견은 자연어. 별도 에러 코드 입력 없음.
     attachments: list[Attachment] = Field(default_factory=list)
     source_context: dict | None = None  # v2 원문 보존. 로컬 입력에는 불필요.
@@ -58,4 +59,4 @@ class DiagnosisReport(Contract):
     task_id: str
     case_id: str
     candidates: list[Candidate]
-    mode: Literal["mock"] = "mock"
+    mode: Literal["mock", "mixed"] = "mock"

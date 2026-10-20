@@ -1,28 +1,153 @@
 # AI Agent Capstone AGENT SERVER
 
-구분된 사진과 기사 소견을 받아 수리 진단을 진행하는 **로컬 모의 이벤트 처리 서버**다.
-상위 기능명세·DB 설계 문서는 수정하지 않는다. 입력 구분과 이벤트 재분석은 대화에서 확정한 최신 방향을 따른다.
+로봇청소기 수리 접수의 구분된 사진과 기사 소견을 받아 분석 도구를 실행하고, 추가 자료 요청 또는 진단 결과 JSON을 생성하는 Agent 서버다.
 
-## 백엔드 v2 연동 범위
+**현재는 스켈레톤 통합 전 기준 코드다.** 실제 PCB MCP를 연결했고, 기계 분석·RAG는 모의 도구이며 최종 리포트는 템플릿이다. Kafka·Spring 사진 다운로드·실제 LLM은 아직 연결하지 않았다.
 
-기준: backend commit `63e0f968f76c893ec9554589d07b51a81e0460ef`의 `docs/INTEGRATION.md`와 `docs/kafka-event.schema.json`.
+## 구현 상태
 
-- `POST /internal/backend-v2/events`: 백엔드의 원본 v2 명령 envelope를 받아 내부 입력으로 변환한다.
-- `DIAGNOSIS_REQUESTED`와 `DIAGNOSIS_RESUMED`, decimal string 업무 ID, UUID 이벤트/실행 ID를 검증한다.
-- `correlationId`, `inputRevision`, `executionId`를 결과에 그대로 전달한다. 결과 sequence는 실행별 1부터 증가한다.
-- STARTED → 현재 실행의 TOOL_EXECUTED → COMPLETED/FAILED 결과 목록을 생성한다. 과거 실행의 도구 기록은 재발행하지 않는다.
-- 결과 UUID·순서는 SQLite에 저장한 후 재전달에도 그대로 유지한다. v2 원문도 상태에 보존해 eventId의 다른 본문 재사용을 거부한다.
-- 결과는 summary/modelVersion/repairMethod/candidates/recommendedParts/evidence 형식이다. 모의 부품 ID를 지어내지 않으므로 recommendedParts는 빈 배열이다.
-- `GET /internal/backend-v2/outgoing-events`: 저장된 v2 결과 확인. 현재 broker에 전송하지는 않는다.
-- `app/backend_v2.py`: Kafka consumer에서 재사용할 `process_backend_command()` 진입점 및 계약 변환 함수.
-- 공식 백엔드 schema 사본은 `tests/fixtures`에 고정하고 실제 출력의 UUID/date-time·필드·형식을 검증한다.
+| 기능 | 현재 상태 |
+|---|---|
+| 입력 검증·라우팅 | PCB/MECHANICAL 사진 구분을 사용. GPT 사진 재분류·SW 분석 분기 없음 |
+| 분석 실행 | 해당 사진의 분석 도구와 RAG를 같은 단계에서 병렬 실행 |
+| PCB 분석 | 실제 MCP stdio → YOLO. 응답·결함 라벨·점수·좌표 검증 |
+| 기계 분석·RAG | 모의 도구. 실제 찌그러짐 분석·검색 품질을 검증한 상태가 아님 |
+| 충분성 판단 | sufficient 및 0.5 임계값을 사용한 임시 규칙 |
+| 추가 자료 | 초기 입력 제외 최대3회. 요청 후 그래프 END, 새 이벤트로 재분석 |
+| 상태·중복 | SQLite 저장, 이벤트 본문 충돌·차수·누적 사진 검증, 재시작 후 중복 방지 |
+| 출력 | Pydantic 검증 리포트 JSON·로컬 결과 이벤트. Markdown 리포트 생성은 미구현 |
+| 기본 Harness | 도구 호출 상한·일시 오류 재시도·PCB 세션 timeout·recursion_limit·구조화 로그 |
+| Spring v2 | 계약 변환·스키마 검증. 미합의 입력/추가 사진 계약은 명시적으로 거부 |
 
-**이번 변경에서 보류한 세 가지:**
-1. 백엔드 사진은 현재 `GENERAL`이다. 이를 임의로 PCB/MECHANICAL로 분류하지 않는다. 구분되지 않은 v2 사진은 409로 거부한다. 예제의 명시적 `PCB`는 변환 테스트용이며 현재 Spring 업로드 결과를 그대로 표현한 것은 아니다.
-2. 접수 시 errorCodes/firmware 필수 여부는 백엔드 담당 범위다. v2 원문에 있으면 보존하되 Agent가 필수로 요구하거나 값을 만들어 넣지 않는다.
-3. PHOTO_REQUESTED의 필수 checkpoint 의미는 미합의다. 대기 경로를 v2로 내보내려 하면 명시적 409를 반환하고 상태·출력 저장도 rollback한다. 가짜 checkpoint나 interrupt를 도입하지 않는다. **사진 재요청 v2 종단간 연결은 아직 불가**하며 로컬 이벤트 API로 동작을 확인한다.
+## 빠른 실행 — 모의 도구
 
-모의 v2 완료 흐름 확인:
+Python 3.12 이상과 uv를 사용한다. API 키·외부 서버 없이 워크플로를 검증한다.
+
+```bash
+uv sync
+uv run python -m app.demo --scenario additional --log-file .local/demo.jsonl
+uv run python -m app.demo --scenario all --log-file .local/demo.jsonl
+```
+
+시나리오: `success`, `additional`, `limit`, `tool-error`, `duplicate`, `v2-blocked`, `all`.
+`limit`/`tool-error`의 FAILED와 `v2-blocked`의 BLOCKED_EXPECTED는 의도한 결과다. 기대 동작과 다르면 명령이 실패한다.
+각 시연은 임시 SQLite를 사용하며 기존 작업 상태를 변경하지 않는다. 모의 실행 로그는 `mode=mock`이다.
+
+로컬 API:
+
+```bash
+AGENT_LOG_FILE=.local/server.jsonl \
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+별도 터미널에서:
+
+```bash
+curl -X POST http://127.0.0.1:8000/internal/events \
+  -H 'Content-Type: application/json' -d @examples/diagnosis.json
+curl -X POST http://127.0.0.1:8000/internal/events \
+  -H 'Content-Type: application/json' -d @examples/additional-input.json
+curl http://127.0.0.1:8000/internal/diagnoses/demo-1
+curl http://127.0.0.1:8000/internal/outgoing-events
+tail -f .local/server.jsonl
+```
+
+API 문서: http://127.0.0.1:8000/docs. API 인증은 아직 없으므로 localhost에서 실행한다.
+기본 상태 파일은 `.local/agent-state.sqlite3`이며 `AGENT_STATE_PATH`로 변경할 수 있다.
+동일 이벤트를 재전송하면 저장된 결과를 반환한다. 새 작업에는 새 task_id/event_id를 사용한다.
+
+## 실제 PCB MCP 실행
+
+[MCP_Error_check의 pcb_agent](https://github.com/skala-ai-agent-team6/MCP_Error_check/tree/883fe6178e65bb5a3366f2a1ff8e30cf0c55551d/pcb_agent)를 사용한다.
+프로토콜 순서는 `initialize → list_tools → analyze_pcb_image`다. Agent에서 YOLO를 직접 호출하지 않는다.
+
+```bash
+uv sync --extra pcb
+# 최초 한 번. 이미 내려받았다면 clone 생략
+mkdir -p .local/vendor
+git clone https://github.com/skala-ai-agent-team6/MCP_Error_check.git .local/vendor/MCP_Error_check
+git -C .local/vendor/MCP_Error_check checkout 883fe6178e65bb5a3366f2a1ff8e30cf0c55551d
+uv run --extra pcb python -m app.pcb_demo
+```
+
+내 사진은 `--image /절대경로/사진.jpg`로 지정한다. API 키는 필요 없다.
+
+- `.local/pcb-live-result.json`: 전체 결과·결함 박스·박스 이미지 경로.
+- `.local/pcb-live.jsonl`: MCP 호출·결함 개수·점수·분기·커밋 로그.
+- 실제 PCB와 모의 기계/RAG가 섞인 응답·로그는 `mode=mixed`다.
+- stdio 프로세스는 호출마다 시작·종료한다. 최초 모델 로딩은 느릴 수 있다.
+- 시연/기본 API 설정의 세션 timeout은35초, 일시 오류는 최대2회 재시도한다.
+- 미등록 사진·잘못된 응답은 실패 처리하며 모의 성공으로 대체하지 않는다.
+
+검증 샘플 `l_light_05_missing_hole_01_4_600.jpg`에서는 missing_hole 3개를 검출했다. 박스 점수는 0.953/0.895/0.627이었다.
+박스 점수 최솟값을 임시 분기 값으로 사용하며 **고장 원인 확률이 아니다**. 미검출도 정상으로 확정하지 않는다.
+SUCCEEDED는 현재 개발 규칙의 흐름 완료를 뜻하며 실제 수리 원인 확정·모델 품질 평가 완료를 뜻하지 않는다.
+
+실제 PCB API는 서버 관리용 photo_id → 로컬 파일 매핑을 설정한다. 요청 본문에서 임의 파일 경로를 받지 않는다.
+
+```bash
+uv run --extra pcb python - <<'PY'
+import json
+from pathlib import Path
+image = Path('.local/vendor/MCP_Error_check/pcb_agent/results/test_before/l_light_05_missing_hole_01_4_600.jpg').resolve()
+Path('.local/pcb-photos.json').write_text(json.dumps({'pcb-demo-photo': str(image)}))
+PY
+AGENT_TOOL_MODE=pcb-live PCB_PHOTO_MANIFEST=.local/pcb-photos.json \
+AGENT_STATE_PATH=.local/pcb-api.sqlite3 AGENT_LOG_FILE=.local/pcb-api.jsonl \
+uv run --extra pcb uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s http://127.0.0.1:8000/internal/events -H 'Content-Type: application/json' \
+  -d '{"event_id":"pcb-e1","event_type":"DIAGNOSIS_REQUESTED","task_id":"pcb-task1","case_id":"pcb-case1","symptom":"기판 손상 의심","attachments":[{"photo_id":"pcb-demo-photo","target":"PCB"}]}'
+```
+
+`PCB_MCP_SCRIPT`/`PCB_MCP_PYTHON`/`PCB_MCP_TIMEOUT`으로 서버·Python·timeout을 변경할 수 있다.
+현재는 누적 자료 중 PCB의 마지막 사진만 분석하고 해당 사진 ID를 근거로 남긴다. 사진 여러 장 비교·공유 저장소 업로드는 미구현이다.
+
+## 현재 실행 흐름과 이벤트
+
+```text
+로컬 이벤트 API / Spring v2 계약 어댑터
+  → 입력·차수·중복 검증
+  → 사진 구분에 맞는 분석 선택
+  → [PCB 분석 ∥ 기계 분석 ∥ RAG 검색]
+  → 전체 결과 수집·충분성 판단
+      ├─ 충분: 템플릿 리포트 JSON 검증 → 완료 이벤트 저장 → END
+      ├─ 부족 + 추가 요청 가능: 요청 생성·저장 → END
+      └─ 오류/한도 초과/3차 추가 분석 후 부족: 실패 이벤트 저장 → END
+
+추가 자료 제출 → 같은 작업 ID·새 이벤트 ID·누적 입력으로 다시 실행
+```
+
+`interrupt`/`Command(resume)`는 사용하지 않는다. WAITING_INPUT은 업무 상태이며 그래프는 종료된 상태다.
+진단 이후 재고 조회·재고 없을 때 승인 후 발주·최종 수리 확정은 Spring/업무 MCP 담당이다.
+
+로컬 입력 `DiagnosisEvent`:
+
+| 필드 | 규칙 |
+|---|---|
+| event_id | 재전달에도 유지. 같은 ID의 다른 본문은 거부 |
+| event_type | DIAGNOSIS_REQUESTED / ADDITIONAL_INPUT_SUBMITTED |
+| task_id / case_id | 같은 작업·접수 유지 |
+| round_no | 최초0, 추가1~3. 마지막 요청 차수와 일치 |
+| symptom | 기사 자연어 소견. 별도 에러 코드 필수 입력 없음 |
+| attachments | photo_id·target(PCB/MECHANICAL)의 누적 목록. 기존 메타데이터 유지 |
+
+로컬 출력은 ADDITIONAL_INPUT_REQUESTED / DIAGNOSIS_COMPLETED / DIAGNOSIS_FAILED다.
+`mock_readable`/`mock_confidence`는 모의 결과 제어용이며 실제 PCB 분석에서 사용하지 않는다.
+
+## Spring v2 어댑터
+
+[backend의 계약](https://github.com/skala-ai-agent-team6/backend/tree/63e0f968f76c893ec9554589d07b51a81e0460ef/docs)을 기준으로 한다. 공식 schema 사본은 tests/fixtures에 고정했다.
+
+- `POST /internal/backend-v2/events`: v2 명령 검증·원문 보존·내부 입력 변환.
+- decimal string 업무 ID, UUID 이벤트/실행 ID, revision·sequence를 검증한다.
+- STARTED → 현재 실행의 TOOL_EXECUTED → COMPLETED/FAILED 결과 목록을 생성·저장한다.
+- 중복 전송에는 저장된 결과 UUID·순서를 유지한다. 부품 ID를 지어내지 않으며 recommendedParts는 빈 배열이다.
+- `GET /internal/backend-v2/outgoing-events`: 저장된 출력 확인. 실제 Kafka 발행은 하지 않는다.
+
+**현재 연동 제약:** 부위가 GENERAL인 사진은 임의 분류하지 않고 거부한다. PHOTO_REQUESTED의 checkpoint 의미는 합의 전이라 해당 v2 대기 경로는409로 거부하고 저장을 rollback한다. errorCodes/firmware가 원문에 있으면 보존하되 Agent가 값을 만들지 않는다.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/internal/backend-v2/events \
@@ -30,112 +155,79 @@ curl -X POST http://127.0.0.1:8000/internal/backend-v2/events \
 curl http://127.0.0.1:8000/internal/backend-v2/outgoing-events
 ```
 
-Kafka 토픽은 명령 `diagnosis.commands.v2`, 결과 `diagnosis.events.v2`, consumer group은 `langgraph-diagnosis-v2`, 메시지 key는 taskId다. **이번에는 메시지 계약 변환까지 구현했으며 실제 Kafka consumer/producer·offset·DLT는 미구현**이다. 현재 출력 목록은 그래프 완료 시 한 번에 만들어지므로 실시간 진행 이벤트 전송도 미연결이다. 실제 연동 때 backend mock AI를 꺼야 한다.
+## 실행 제한·로그
 
-## 실행 흐름
+| 항목 | 현재 적용 | 한계 |
+|---|---|---|
+| 추가 자료 요청 | 작업 전체 최대3회, 초기 제외 | 3차 자료로 성공 가능. 4차 요청·입력 거부 |
+| 그래프 | 이벤트별20 super-step | LLM 턴·사진 횟수와 다름. 초과 시 GRAPH_STEP_LIMIT |
+| 도구 호출 | 작업 누적24회 | 검색·재시도 시도 포함 |
+| 일시 오류 재시도 | 호출당 최대2회 | 사진 요청 횟수와 별개 |
+| 시간 | PCB 세션 timeout, 분석 단계120초 반환 전후 검사 | 전체 작업의 엄격한 취소·누적 시간 제한은 미구현 |
 
-```text
-Spring 저장 → Kafka 이벤트 → Agent 이벤트 처리 함수
-  → 구분된 사진·자연어 소견으로 필요한 분석 선택
-  → 분석 MCP 결과 수집 → 확신·단서 충분성 판단
-     ├─ 충분: RAG 검색 → 리포트 JSON → 완료 이벤트 → END
-     └─ 부족:
-         ├─ 추가 요청 3회 미만: 추가 자료 요청 이벤트 → END
-         └─ 3차 제출 후에도 부족: 실패·사람 검토 이벤트 → END
+PCB의 missing_hole/mouse_bite/open_circuit/short/spur/spurious_copper **6종은 결함 클래스 수**이며 실행 한도가 아니다.
 
-Spring이 추가 사진·설명을 저장 → 같은 작업 ID로 새 Kafka 이벤트
-  → 기존 정보 + 새 자료를 입력으로 그래프를 다시 실행
-```
+JSON 로그는 event_id/task_id/case_id/input_round로 연결한다. v2는 correlationId/executionId/inputRevision도 포함한다.
+`tool.started/succeeded/failed/retry`, `mcp.call_started/completed`, `analysis.evaluated`, `graph.branch`, `input.requested`, `event.duplicate/committed/rolled_back`을 확인한다.
+도구 성공만으로 저장 성공이 보장되지 않으므로 마지막 커밋/롤백 로그까지 확인한다.
+기사 소견 원문·사진 ID 목록·전체 응답·토큰을 Agent 로그에 남기지 않는다. 파일은5MB마다 회전하고 이전3개를 보관한다.
+`.local/`의 DB·로그·사진·모델·외부 저장소와 `.env`는 Git에서 제외한다.
 
-**interrupt, Command(resume), LangGraph 체크포인트 대기, Agent의 발주 승인 대기는 사용하지 않는다.**
-진단 이후 창고 재고 조회·재고가 없을 때 승인 후 발주·기사 최종 보고서 처리는 Spring/업무 MCP 담당이다.
-
-## 현재 구현과 범위
-
-- FastAPI `/internal/events`가 최초/추가 이벤트를 받는다. 실제 Kafka consumer를 대신하는 로컬 테스트 입구다.
-- `EventProcessor.process()`가 전송 수단과 독립된 이벤트 처리 진입점이다. 실제 consumer에서 같은 함수를 호출할 수 있다.
-- PCB 사진과 찌그러짐/기계 사진은 `PCB`, `MECHANICAL`로 구분하고 원본 대신 `photo_id`를 받는다.
-- 기사 소견은 자연어 `symptom`이다. 별도 `error_codes` 입력은 없다.
-- 사진 종류 재분류는 하지 않는다. 입력 부위에 맞는 PCB·기계 분석만 실행하며 별도 SW MCP 분기는 없다. 기사 소견은 자연어 원문으로 분석 도구와 RAG 검색에 전달한다.
-- 분석 결과 `sufficient=false` 또는 `confidence<0.5`일 때 해당 영역의 사진/설명 추가 요청.
-- 초기 입력은 0차, 추가 요청은 최대 3차. 3차 자료로 성공할 수 있으며 여전히 부족하면 실패한다.
-- 일시 오류 최대 2회 재시도, 작업 전체 도구 호출 최대 24회. 서버 오류 재시도와 사진 요청 횟수는 독립이다.
-- SQLite에 작업 상태·처리한 이벤트·출력 이벤트를 한 트랜잭션으로 저장한다. 동일 이벤트 재전달 시 기존 응답을 그대로 돌려주고 출력 이벤트를 중복 생성하지 않는다.
-- 잘못된 차수·다른 접수 ID·종료 작업·입력 변경 없는 추가 제출·기존 사진 누락·event_id 본문 충돌은 거부한다.
-- 최종 리포트는 Pydantic으로 검증한다.
-
-**실제 LLM, MCP 통신, 사진 분석, Spring API, Kafka 송수신, SSE, 업무 DB는 미연결이다.**
-`mock_readable`과 `mock_confidence`는 가짜 도구의 결과를 제어한다. 실제 이미지 품질이나 진단 확률이 아니다.
-실제 YOLO 어댑터 연결 시 모델 지원 범위·탐지 없음·개별 박스 점수와 진단 확신의 차이를 반영해야 한다.
-분석 결과가 충분하면 RAG MCP로 매뉴얼·유사 사례를 검색해 리포트 근거에 붙인다. 소견에 소프트웨어 관련 표현이 있어도 별도 SW 분석 도구를 호출하지 않는다.
-
-## 실행
-
-Python 3.12 이상과 uv:
+## 검증 방법과 완료 기준
 
 ```bash
-uv sync
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+uv run --extra pcb pytest -q
+uv run python -m app.demo --scenario all --log-file .local/demo.jsonl
+uv run --extra pcb python -m app.pcb_demo
 ```
 
-http://127.0.0.1:8000/docs 에서 확인한다. 기존 가상환경을 옮겼다면 `uv sync`로 경로를 갱신한다.
+검증 범위는 성공·추가 자료·3회 소진·도구 오류·중복·상태 복구·v2 계약·병렬 실행·MCP stdio·timeout이다.
+외부 모델 없는 단위 테스트와 실제 PCB 샘플 검증을 구분한다. MCP 선택 의존성이 없으면 stdio 테스트 일부는 skip될 수 있다.
+수정마다 성공 시나리오의 **최종 JSON 생성·Pydantic/JSON Schema 검증**과 추가 요청/실패 시나리오의 의도한 종결까지 확인한다.
+스켈레톤 통합 후에는 Kafka 결과 계약과 Markdown 리포트 파일 생성도 완료 기준에 추가한다.
 
-```bash
-# 최초 요청: 점수가 낮아 추가 자료 요청 이벤트를 반환하고 그래프는 종료
-curl -X POST http://127.0.0.1:8000/internal/events \
-  -H 'Content-Type: application/json' -d @examples/diagnosis.json
+## 다음 단계 — 스켈레톤 통합 전 계획
 
-# 새 이벤트: 같은 작업의 기존 자료 + 추가 사진으로 다시 분석
-curl -X POST http://127.0.0.1:8000/internal/events \
-  -H 'Content-Type: application/json' -d @examples/additional-input.json
+[skeleton-agent](https://github.com/skala-ai-agent-team6/skeleton-agent)의 확인 기준 커밋은 `99372b0ababe1971441f35556f38c0cd6cebe4c1`이다. 현재 저장소에는 통합하지 않았다.
+Kafka 입출력·Spring 사진 다운로드·LLM 리포트 뼈대를 가져오고, 이 저장소의 검증·상태 관리·실행 제한·로그·테스트를 결합할 계획이다.
 
-# 마지막 작업 상태와 저장된 출력 이벤트 확인
-curl http://127.0.0.1:8000/internal/diagnoses/demo-1
-curl http://127.0.0.1:8000/internal/outgoing-events
+최신 합의의 해석/검색 MCP 구성은 아래4개 서버·7개 도구다. **이 표는 연결 계획이며 현재 구현 목록이 아니다.** 사진 추론 모델과 라벨 해석 도구를 구분한다.
 
-uv run pytest -q
-```
+| 서버 | 도구 |
+|---|---|
+| observation-mcp | normalize_observation / list_observation_terms |
+| pcb-mcp | interpret_pcb |
+| damage-mcp | interpret_damage / list_damage_labels |
+| rag-mcp | retrieve_repair_context / search_reference_documents |
 
-같은 예제 파일을 다시 보내면 처음 처리했던 결과를 반환한다. 새 작업을 시험하려면 새 task_id와 event_id를 사용한다.
-서버 기본 상태 파일은 `.local/agent-state.sqlite3`이며 Git에서 제외한다.
-별도 경로는 `AGENT_STATE_PATH=/원하는/경로.sqlite3`로 지정한다. 업무 PostgreSQL과 별개인 로컬 개발용 저장소다.
+목표 순서는 입력 검증 → [소견 정규화 ∥ 사진 분석·라벨 해석] → 통합 RAG → 충분성 판단 → 리포트/추가 요청/실패다.
+통합 RAG는 분석 라벨을 입력받으므로 현재 코드의 병렬 모의 검색과 실행 순서가 다르다. 기존 사진 분석 MCP의 analyze_pcb_image와 interpret_pcb는 별개 역할이다.
+도메인 불일치·미등록 라벨·검색 없음·도구 장애를 사진 품질 부족과 구분해야 한다. 검색 점수·검출 점수를 진단 확률로 취급하지 않는다.
 
-## 이벤트 계약 초안
+## Harness 잔여 과제
 
-입력은 `DiagnosisEvent`:
-- `event_id`: Kafka 재전달에도 동일하게 유지하는 메시지 식별자.
-- `event_type`: `DIAGNOSIS_REQUESTED` 또는 `ADDITIONAL_INPUT_SUBMITTED`.
-- `task_id`, `case_id`: Spring이 만든 같은 진단 작업·접수 ID. 문자열.
-- `round_no`: 최초 0, 추가 제출 1~3. 마지막 추가 요청의 차수와 일치해야 한다.
-- `symptom`: 기존 설명과 추가 소견을 반영한 자연어 텍스트.
-- `attachments`: 기존 사진과 새 사진을 포함한 누적 목록. 기존 photo_id·대상 등 메타데이터는 유지한다.
+MCP 교재의8개 요소 전체가 목표이며 기본 실행 제한만으로 완료로 간주하지 않는다.
 
-출력은 작업 결과의 `outgoing_event`:
-- `ADDITIONAL_INPUT_REQUESTED`: `round_no`, `targets`, `instructions`.
-- `DIAGNOSIS_COMPLETED`: Pydantic 형식의 리포트.
-- `DIAGNOSIS_FAILED`: 오류 코드와 `manual_review_required=true`.
+| 요소 | 남은 작업 |
+|---|---|
+| Instructions | prompts/*.md 버전 관리·LLM 역할/출력 규칙 |
+| Tools | 나머지 실제 MCP·결과 길이 제한·LLM 도구 오류 전달 |
+| Context | 토큰 예산·긴 입력 요약·실제 RAG 근거 주입 |
+| State/Memory | 이벤트 재분석과 checkpointer/store 요구 대응, 분산 worker claim/lease |
+| Agent Loop | 모델 턴·같은 도구 반복·전체 deadline·토큰/비용 예산 |
+| Guardrails | 민감정보 처리·변경 도구 차단/승인 경계 검증 |
+| Recovery | 실제429/503·Kafka 재처리/DLT·저장/발행 간 장애 복구 |
+| Observability | 공통 trace·LangSmith·토큰/비용·실패 추적·평가 기록 |
 
-본문의 `status=WAITING_INPUT`은 **업무상 추가 제출 대기**를 뜻한다. 그래프 자체는 END에 도달한 상태다.
-추가 자료가 들어오면 체크포인트를 재개하지 않고 새 그래프 실행을 시작한다.
+SQLite는 현재 도구 실행 중 쓰기 잠금을 유지하는 로컬 구현이다. Kafka worker에 결합할 때 DB 트랜잭션 밖 실행·durable inbox/outbox·동일 출력 재전송을 설계해야 한다. 로컬 중복 방지만으로 외부 호출 exactly-once를 보장하지 않는다.
 
-## 파일 역할
+## 파일 안내
 
-- `app/models.py`: 이벤트·사진·최종 리포트 데이터 계약.
-- `app/workflow.py`: 노드·분기·도구 실행·추가 요청·종료.
-- `app/adapters.py`: 분석/검색 도구 인터페이스 및 가짜 구현.
-- `app/service.py`: 이벤트 중복 방지·차수 검증·SQLite 상태/출력 이벤트 저장.
-- `app/backend_v2.py`: Spring v2 명령 검증·원문 보존·결과 envelope 변환.
-- `app/main.py`: 로컬 테스트 API. 기존 `/photos`, `/mock-approval`, 최초 `/internal/diagnoses` POST는 제거했다.
-- `examples/`: 최초 요청과 추가 자료 이벤트 예시.
-- `tests/test_workflow.py`: 낮은 확신·재분석·3회 제한·중복·재시작·오류·종료 검증.
-
-## 실제 연동 전에 남은 작업
-
-1. Kafka 토픽·이벤트 형식, Spring 상태 저장/횟수 관리 책임을 담당자와 합의한다. 로컬 계약은 팀 확정 규격이 아니다.
-2. Kafka consumer와 출력 이벤트 publisher를 연결한다. 현재 출력은 SQLite에만 보관하며 Spring에 실제 발행하지 않는다. 발행 확인·재전송·consumer offset 커밋 정책이 필요하다.
-3. 실제 MCP 클라이언트로 교체하고 사진 ID를 원본에 연결한다. 현재 모의 도구는 순차 실행이다. 독립 MCP의 병렬 호출은 결과 정규화 후 구현한다.
-4. 자연어 소견 처리와 최종 리포트를 LLM 구조화 출력으로 연결한다. 현재 리포트는 고정 모의 문구다.
-5. 실제 네트워크 timeout·취소를 구현한다. 지금은 분석 단계 반환 전후의 120초 경과 검사이므로 멈춘 호출을 중단하지 못하고, 여러 이벤트의 누적 시간도 제한하지 않는다.
-6. 서비스 인증, 입력 권한, 민감 정보 마스킹을 연결한다. 이 로컬 API는 인증이 없으므로 localhost에서만 실행한다.
-7. 현재 로컬 저장소는 장기 도구 호출 동안 DB 쓰기 잠금을 유지한다. 분산 worker 운영 전 durable claim/lease와 실행 외부 부작용의 멱등성으로 교체한다. 입력 이벤트의 중복 방지 자체가 외부 API 실행의 exactly-once를 보장하지는 않는다.
-8. 재처리 가능한 인프라 오류의 Kafka 재시도·최종 실패 정책을 합의한다. 현재는 내부 재시도 소진 후 실패 이벤트를 생성한다.
+- app/workflow.py: 그래프·병렬 호출·충분성 판단·추가 요청·종료.
+- app/pcb.py: 실제 PCB stdio 클라이언트·사진 매핑·응답 정규화.
+- app/service.py: 입력 중복/차수 검증·SQLite 상태/결과 저장.
+- app/backend_v2.py: Spring 계약 검증·변환.
+- app/models.py, app/limits.py: 데이터 계약·공통 한도.
+- app/observability.py: JSON 로그·파일 회전.
+- app/main.py: 로컬 API. app/demo.py, app/pcb_demo.py: 시연 CLI.
+- tests/, examples/: 회귀 테스트·계약 fixture·입력 예시.

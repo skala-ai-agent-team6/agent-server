@@ -2,20 +2,25 @@
 import os
 from fastapi import FastAPI, HTTPException
 from app.backend_v2 import BackendCommand, process_backend_command
-from app.adapters import MockTools
+from app.pcb import configured_tools
 from app.models import DiagnosisEvent
 from app.service import EventConflict, EventProcessor
 from app.workflow import build_graph
+from app.observability import configure_logging
+from app.limits import DEFAULT_GRAPH_STEP_LIMIT
 
 
-def create_app(tools=None, store_path=":memory:", **limits):
-    app = FastAPI(title="Agent Server — local event mock", version="0.2.0")
-    processor = EventProcessor(build_graph(tools or MockTools(), **limits), store_path)
+def create_app(tools=None, store_path=":memory:", graph_step_limit=DEFAULT_GRAPH_STEP_LIMIT, **limits):
+    configure_logging()
+    app = FastAPI(title="Agent Server — local event runner", version="0.3.0")
+    tools = tools if tools is not None else configured_tools()
+    mode = getattr(tools, "mode", "mock")
+    processor = EventProcessor(build_graph(tools, **limits), store_path, graph_step_limit, mode=mode)
     app.state.processor = processor
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": "mock", "persistence": "sqlite" if store_path != ":memory:" else "memory"}
+        return {"status": "ok", "mode": mode, "persistence": "sqlite" if store_path != ":memory:" else "memory"}
 
     @app.post("/internal/events")
     def process_event(body: DiagnosisEvent):
