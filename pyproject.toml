@@ -7,6 +7,7 @@ dependencies = [
     "aiokafka>=0.12",
     "fastmcp>=4.1.1",
     "httpx>=0.28",
+    "httpx2>=2.15",
     "langchain-openai>=1",
     "langgraph>=1,<2",
     "python-dotenv>=1",

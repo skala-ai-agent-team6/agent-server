@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import config as C
 from .harness import guarded
+from .tool_policy import check_image_result, check_object, check_response
 
 # ── 1. 사진 ──────────────────────────────────────────────
 
@@ -51,12 +52,15 @@ async def load_photos(command: dict) -> list[dict]:
 async def call_mech_mcp(path: str) -> dict:
     """mechanical-mcp: 표면 결함(scratches, patches 등) + 찌그러짐(dent, breakage)을 둘 다 보고 합친다."""
     async with Client(C.MECH_MCP_URL) as c:
-        surface = (await c.call_tool("detect_surface_defects", {"photo_id": path})).data
-        dent = (await c.call_tool("detect_dents", {"photo_id": path})).data
+        surface = check_image_result(check_response(
+            await c.call_tool("detect_surface_defects", {"photo_id": path}), "detect_surface_defects").data,
+            "detect_surface_defects")
+        dent = check_image_result(check_response(
+            await c.call_tool("detect_dents", {"photo_id": path}), "detect_dents").data, "detect_dents")
     return {
         "is_defective": surface["is_defective"] or dent["is_defective"],
         "defects": surface["defects"] + dent["defects"],
-        "defect_counts": {**surface["defect_counts"], **dent["defect_counts"]},
+        "defect_counts": {**surface.get("defect_counts", {}), **dent.get("defect_counts", {})},
         "annotated_image": surface["annotated_image"],
         "dent_image": dent["annotated_image"],
         "damage_labels": surface.get("damage_labels", []) + dent.get("damage_labels", []),
@@ -70,7 +74,9 @@ async def call_pcb_mcp(path: str) -> dict:
     # 옛 서버가 내는 경고(server/discover 모름)는 터미널 대신 로그 파일로. 동작엔 문제없음
     async with Client(transport) as c:
         r = await c.call_tool("analyze_pcb_image", {"image_path": path})
-        return json.loads(r.content[0].text)  # 옛 mcp 1.x 서버라 결과가 글(JSON 문자열)로 온다
+        check_response(r, "analyze_pcb_image")
+        return check_image_result(json.loads(r.content[0].text), "analyze_pcb_image")
+        # 옛 mcp 1.x 서버라 결과가 글(JSON 문자열)로 온다
 
 
 @guarded()
@@ -83,7 +89,9 @@ async def call_rag_mcp(text: str, pcb_labels: list[str]) -> dict:
     request = {"raw_text": text, "origin": "technician", "technician_confirmed": True,
                "pcb_labels": pcb_labels, "damage_labels": [], "top_k": 3}
     async with Client(C.RAG_MCP_URL, timeout=60) as c:
-        d = (await c.call_tool("retrieve_repair_context", {"request": request})).structured_content
+        d = check_object(check_response(
+            await c.call_tool("retrieve_repair_context", {"request": request}),
+            "retrieve_repair_context").structured_content, "retrieve_repair_context")
     hits = [{"kind": "CASE", "citation": x["source_id"], "sourceUri": x["source_url"],
              "excerpt": (x.get("korean_summary") or x.get("chunk_text") or "")[:300]} for x in d["repair_cases"]]
     hits += [{"kind": "LABEL", "citation": x["document_id"], "excerpt": x["title"]} for x in d["label_definitions"]]

@@ -4,6 +4,7 @@ from fastmcp import Client
 
 from . import config as C
 from .harness import guarded
+from .tool_policy import check_object, check_response
 
 DENT_PARTS = frozenset(("boot", "doorouter", "fender", "front-bumper", "quaterpanel", "roof"))
 
@@ -24,15 +25,11 @@ def dent_labels(output):
 async def call(url, name, arguments):
     async with Client(url, timeout=C.TOOL_TIMEOUT) as client:
         response = await client.call_tool(name, arguments)
-    if response.is_error:
-        raise ValueError("MCP tool failed: " + name)
+    check_response(response, name)
     data = response.structured_content
     if data is None:
         data = json.loads("".join(block.text for block in response.content if hasattr(block, "text")))
-    if not isinstance(data, dict):
-        raise ValueError("MCP result must be an object")
-    json.dumps(data, allow_nan=False)
-    return data
+    return check_object(data, name)
 
 
 async def normalize_observation(text):

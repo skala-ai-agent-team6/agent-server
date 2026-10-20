@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
+import httpx2
 import pytest
 from openai import APIStatusError
 
@@ -61,7 +62,8 @@ def test_100_dent_photos_produce_one_interpretation_label(monkeypatch):
     from worker import enrichment
     interpreter = AsyncMock(return_value={"detections": []})
     monkeypatch.setattr(enrichment, "interpret_damage", interpreter)
-    model = AsyncMock(return_value={"is_defective": True, "defects": [{"type": "roof-dent"}]})
+    model = AsyncMock(return_value={"is_defective": True, "annotated_image": "/tmp/fixture.jpg",
+                                   "defects": [{"type": "roof-dent", "confidence": .7}]})
     state = {"photos": [{"kind": "MECH", "path": "fixture.jpg", "attachmentId": str(i+1)}
                         for i in range(100)]}
     asyncio.run(graph.run_photo_mcp(state, {"configurable": {"emit": AsyncMock()}},
@@ -127,3 +129,53 @@ def test_kafka_consumer_uses_long_job_limit(monkeypatch):
     monkeypatch.setattr(main, "AIOKafkaProducer", lambda **kwargs: SimpleNamespace(
         start=AsyncMock(), stop=AsyncMock()))
     asyncio.run(main.run())
+
+
+@pytest.mark.parametrize('failed_tool', ['detect_surface_defects', 'detect_dents'])
+def test_mechanical_partial_failure_never_becomes_success(monkeypatch, failed_tool):
+    from worker.tool_policy import ToolResponseError
+    calls = []
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def call_tool(self, name, arguments):
+            calls.append(name)
+            good = {'is_defective': True, 'defects': [{'type': 'dent', 'confidence': .7}],
+                    'annotated_image': '/tmp/boxed.jpg'}
+            return SimpleNamespace(is_error=name == failed_tool,
+                                   data={'error': 'private details'} if name == failed_tool else good)
+    monkeypatch.setattr(tools, 'Client', Client)
+    with pytest.raises(ToolResponseError) as caught:
+        asyncio.run(tools.call_mech_mcp('/tmp/test.jpg'))
+    assert caught.value.tool == failed_tool
+    assert calls.count(failed_tool) == 1  # 도구의 논리 오류는 일시적 연결 오류가 아님
+
+
+
+
+@pytest.mark.parametrize('inner,retry', [
+    (httpx.ConnectError('offline'), True),
+    (httpx2.ConnectError('offline'), True),
+    (ExceptionGroup('transport', [httpx2.ConnectError('offline')]), True),
+    (ExceptionGroup('transport', [httpx.ConnectError('offline')]), True),
+    (ExceptionGroup('mixed', [httpx.ConnectError('offline'), ValueError('invalid')]), False),
+    (httpx.HTTPStatusError('auth', request=httpx.Request('GET', 'https://example.invalid'),
+                           response=httpx.Response(401)), False),
+    (ValueError('schema'), False),
+])
+def test_fastmcp_wrapped_error_retry(monkeypatch, inner, retry):
+    monkeypatch.setattr(harness.asyncio, 'sleep', AsyncMock())
+    wrapper = RuntimeError('MCP session initialization failed')
+    wrapper.__cause__ = inner
+    call = AsyncMock(side_effect=wrapper)
+    call.__name__ = 'wrapped_mcp'
+    with pytest.raises(RuntimeError):
+        asyncio.run(harness.guarded()(call)())
+    assert call.await_count == (3 if retry else 1)
+
+
+def test_retry_cause_cycle_is_not_retried():
+    error = RuntimeError('cycle')
+    error.__cause__ = error
+    assert not harness.transient(error)

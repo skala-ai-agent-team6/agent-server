@@ -23,6 +23,7 @@ log = logging.getLogger("worker")
 GRAPH = build_graph()
 from . import harness
 from .journal import Journal, CommandConflict
+from .tool_policy import RequiredToolFailure
 from jsonschema.exceptions import ValidationError
 
 
@@ -65,6 +66,7 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
                 log.error("진단 실행 실패: %s", type(exc).__name__)
                 code = ("GRAPH_STEP_LIMIT" if isinstance(exc, GraphRecursionError) else
                         "EXECUTION_LIMIT" if isinstance(exc, harness.LimitExceeded) else
+                        "REQUIRED_TOOL_FAILED" if isinstance(exc, RequiredToolFailure) else
                         "RUN_TIMEOUT" if isinstance(exc, TimeoutError) else "AGENT_ERROR")
                 result = {"eventType": "DIAGNOSIS_FAILED", "payload": {"errorCode": code}}
                 journal.finish(command, result)
@@ -75,7 +77,8 @@ async def handle(command: dict, producer: AIOKafkaProducer, journal=None):
                                        (command["eventId"], json.dumps(metrics)))
         path = report.save(command, result)
         await flush(journal, command, producer)
-        if result["payload"].get("errorCode") in ("AGENT_ERROR", "GRAPH_STEP_LIMIT", "EXECUTION_LIMIT", "RUN_TIMEOUT"):
+        if result["payload"].get("errorCode") in ("AGENT_ERROR", "GRAPH_STEP_LIMIT", "EXECUTION_LIMIT",
+                                                "RUN_TIMEOUT", "REQUIRED_TOOL_FAILED"):
             await producer.send_and_wait(C.DLT_TOPIC, json.dumps(command).encode(), key=command["taskId"].encode())
         log.info("task %s → %s (리포트: %s)", command["taskId"], result["eventType"], path)
         return result

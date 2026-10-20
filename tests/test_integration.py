@@ -213,3 +213,141 @@ def test_business_gateway_auth_mapping_and_write_rejection(monkeypatch):
         assert rpc.await_count == 1
         body["params"]["name"] = "create_purchase_order_draft"
         assert client.post("/rpc", json=body, headers=headers).status_code == 400
+
+
+@pytest.mark.parametrize('bad', [
+    {'error': 'private server details'},
+    {'is_defective': False},
+    {'is_defective': 'false', 'defects': [], 'annotated_image': '/tmp/image.jpg'},
+    {'is_defective': False, 'defects': [{'type': 'short', 'confidence': .4}], 'annotated_image': '/tmp/image.jpg'},
+    {'is_defective': True, 'defects': [{'type': 'short', 'confidence': float('nan')}], 'annotated_image': '/tmp/image.jpg'},
+])
+def test_bad_image_output_fails_without_requesting_photos(fixture_tools, tmp_path, bad):
+    tools.call_pcb_mcp.return_value = bad
+    async def run():
+        journal, producer, cmd = Journal(tmp_path/'state.db'), Producer(), command()
+        try:
+            result = await main.handle(cmd, producer, journal)
+            assert result == {'eventType': 'DIAGNOSIS_FAILED', 'payload': {'errorCode': 'REQUIRED_TOOL_FAILED'}}
+            assert not any(e.get('eventType') == 'PHOTO_REQUESTED' for e in producer.events)
+            tools.write_report.assert_not_awaited()
+            markdown = next(report.OUT.glob('*.md')).read_text()
+            assert '정상 판정이 아닙니다' in markdown
+            assert 'private server details' not in json.dumps(producer.events)
+            assert json.loads(next(report.OUT.glob('*.json')).read_text())['result'] == result
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+def test_required_image_retries_then_failed_and_duplicate_reuses_result(fixture_tools, monkeypatch, tmp_path):
+    monkeypatch.setattr(harness.asyncio, 'sleep', AsyncMock())
+    model = AsyncMock(side_effect=ConnectionError('private endpoint'))
+    model.__name__ = 'test_image_model'
+    monkeypatch.setattr(tools, 'call_pcb_mcp', harness.guarded()(model))
+    async def run():
+        journal, producer, cmd = Journal(tmp_path/'state.db'), Producer(), command()
+        try:
+            result = await main.handle(cmd, producer, journal)
+            assert result['payload']['errorCode'] == 'REQUIRED_TOOL_FAILED'
+            assert model.await_count == 3
+            assert (await main.handle(cmd, producer, journal)) == result
+            assert model.await_count == 3
+            metrics = json.loads(journal.db.execute('SELECT metrics FROM executions').fetchone()[0])
+            assert metrics['retries'] == 2
+            finals = [e for e in producer.events if e['eventType'] == 'DIAGNOSIS_FAILED']
+            assert len(finals) == 1
+            assert all(e['eventType'] != 'PHOTO_REQUESTED' for e in producer.events)
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+def test_mixed_success_cannot_hide_failed_mechanical_tool(fixture_tools, tmp_path):
+    tools.call_mech_mcp.side_effect = ConnectionError()
+    cmd = command()
+    cmd['payload']['attachments'].append({**cmd['payload']['attachments'][0], 'id': '2',
+        'target': 'MOTOR', 'downloadPath': '/internal/attachments/2'})
+    cmd['payload']['attachmentIds'].append('2')
+    async def run():
+        journal = Journal(tmp_path/'state.db')
+        try:
+            result = await main.handle(cmd, Producer(), journal)
+            assert result['payload']['errorCode'] == 'REQUIRED_TOOL_FAILED'
+            tools.write_report.assert_not_awaited()
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('optional', ['rag', 'observation', 'pcb_interpretation'])
+def test_optional_failure_is_visible_in_final_json_and_markdown(fixture_tools, tmp_path, optional):
+    target = {'rag': tools.call_rag_mcp, 'observation': enrichment.normalize_observation,
+              'pcb_interpretation': enrichment.interpret_pcb}[optional]
+    target.side_effect = ConnectionError('sensitive server details')
+    async def run():
+        journal, producer = Journal(tmp_path/'state.db'), Producer()
+        try:
+            result = await main.handle(command(), producer, journal)
+            assert result['eventType'] == 'DIAGNOSIS_COMPLETED'
+            assert '근거 제한:' in result['payload']['summary']
+            assert 'sensitive server details' not in json.dumps(result)
+            assert '근거 제한:' in next(report.OUT.glob('*.md')).read_text()
+            assert json.loads(next(report.OUT.glob('*.json')).read_text())['result'] == result
+            failures = [e for e in producer.events if e['eventType'] == 'TOOL_EXECUTED'
+                        and e['payload']['output'].get('error')]
+            assert len(failures) == 1
+            assert failures[0]['payload']['output']['failurePolicy'] == 'optional'
+            for event in producer.events:
+                VALIDATOR.validate(event)
+            if optional == 'rag':
+                assert not any(e['type'] in ('CASE', 'MANUAL') for e in result['payload']['evidence'])
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+def test_optional_failure_does_not_turn_no_detection_into_tool_failure(fixture_tools, tmp_path):
+    tools.call_pcb_mcp.return_value = {**fixture_tools, 'is_defective': False, 'defects': []}
+    tools.call_rag_mcp.side_effect = ConnectionError()
+    async def run():
+        journal = Journal(tmp_path/'state.db')
+        try:
+            result = await main.handle(command(), Producer(), journal)
+            assert result['eventType'] == 'PHOTO_REQUESTED'
+            assert result['payload']['round'] == 1
+            assert '근거 제한:' in result['payload']['description']
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+def test_report_llm_failure_saves_failure_report(fixture_tools, tmp_path):
+    tools.write_report.side_effect = ValueError("invalid report")
+    async def run():
+        journal = Journal(tmp_path/'state.db')
+        try:
+            result = await main.handle(command(), Producer(), journal)
+            assert result["payload"]["errorCode"] == "AGENT_ERROR"
+            tools.write_report.assert_awaited_once()
+            assert list(report.OUT.glob("*.json")) and list(report.OUT.glob("*.md"))
+        finally:
+            journal.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('fault', ['mechanical-unavailable', 'rag-unavailable'])
+def test_fault_runner_checks_actual_nested_error_output(fixture_tools, monkeypatch, tmp_path, fault):
+    from worker import verify_live
+    monkeypatch.setattr(C, 'USE_GPT', True)
+    monkeypatch.setattr(C, 'ROOT', tmp_path)
+    monkeypatch.setattr(harness.asyncio, 'sleep', AsyncMock())
+    model = AsyncMock(side_effect=ConnectionError())
+    model.__name__ = 'offline_tool'
+    monkeypatch.setattr(tools, 'call_mech_mcp' if fault == 'mechanical-unavailable' else 'call_rag_mcp',
+                        harness.guarded()(model))
+    rows = asyncio.run(verify_live.run('mixed', fault))
+    assert rows[0]['fault'] == fault
+    assert Path(rows[0]['report']).is_file()
+    assert rows[0]['errors'][0]['output']['failurePolicy'] == (
+        'required' if fault == 'mechanical-unavailable' else 'optional')

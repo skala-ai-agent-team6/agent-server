@@ -16,6 +16,8 @@ from . import config as C
 from . import tools
 from . import enrichment
 from .harness import LimitExceeded, observed
+from .tool_policy import (RequiredToolFailure, check_image_result, check_object,
+                          failure_output, limitation_note)
 
 
 class State(TypedDict, total=False):
@@ -63,11 +65,11 @@ async def split_text(state: State, config) -> dict:
 async def supplemental(config, name, server, call):
     """추가 해석은 근거만 보강한다. 성공/실패로 원본의 found 판단을 바꾸지 않는다."""
     try:
-        out = await call()
+        out = check_object(await call(), name)
     except LimitExceeded:
         raise
     except Exception as exc:
-        out = {"error": type(exc).__name__}
+        out = failure_output(name, exc, required=False)
     await emit(config, "TOOL_EXECUTED", {"tool": name, "toolVersion": "1", "agentType": "RAG",
                                         "mcpServer": server, "input": {}, "output": out})
     return {"source": "INTERPRETATION", "attachmentId": None, "found": False,
@@ -93,11 +95,16 @@ async def run_photo_mcp(state, config, kind: str, call, tool: str, agent_type: s
     findings = []
     for p in [p for p in state["photos"] if p["kind"] == kind]:
         try:
-            out = await call(p["path"])
+            out = check_image_result(await call(p["path"]), tool)
         except LimitExceeded:
             raise
-        except Exception as e:  # MCP 꺼짐 등. 멈추지 않고 '못 찾음'으로 넘긴다
-            out = {"error": type(e).__name__}
+        except Exception as e:
+            # 선택된 이미지 분석은 필수. 서버 장애를 '검출 없음'으로 넘기지 않는다.
+            out = failure_output(tool, e, required=True)
+            await emit(config, "TOOL_EXECUTED", {"tool": out["tool"], "toolVersion": "1",
+                       "agentType": agent_type, "mcpServer": server,
+                       "input": {"path": p["path"]}, "output": out})
+            raise RequiredToolFailure(out["tool"], out["error"]) from e
         await emit(config, "TOOL_EXECUTED", {"tool": tool, "toolVersion": "1", "agentType": agent_type,
                                              "mcpServer": server, "input": {"path": p["path"]}, "output": out})
         findings.append({"source": kind, "attachmentId": p["attachmentId"], "found": bool(out.get("is_defective")), "output": out})
@@ -132,11 +139,11 @@ async def rag_mcp(state: State, config) -> dict:
     pcb_labels = sorted({d["type"] for f in state.get("findings", []) if f["source"] == "PCB"
                          for d in f["output"].get("defects", [])})
     try:
-        out = await tools.call_rag_mcp(text, pcb_labels)
+        out = check_object(await tools.call_rag_mcp(text, pcb_labels), "retrieve_repair_context")
     except LimitExceeded:
         raise
-    except Exception as e:  # RAG 서버 꺼짐 등. 검색 없이 진행
-        out = {"hits": [], "error": type(e).__name__}
+    except Exception as e:  # 보조 검색 실패는 기록하고 리포트에도 누락을 명시한다.
+        out = {"hits": [], **failure_output("retrieve_repair_context", e, required=False)}
     await emit(config, "TOOL_EXECUTED", {"tool": "retrieve_repair_context", "toolVersion": "1", "agentType": "RAG",
                                          "mcpServer": "rag-mcp", "input": {"text": text, "pcbLabels": pcb_labels}, "output": out})
     return {"findings": [{"source": "RAG", "attachmentId": None, "found": False, "output": out}]}
@@ -181,6 +188,9 @@ async def report(state: State, config) -> dict:
     payload = {"summary": r.summary, "modelVersion": C.MODEL_VERSION, "repairMethod": r.repairMethod,
                "candidates": candidates, "recommendedParts": [p.model_dump() for p in r.recommendedParts],
                "evidence": evidence}
+    note = limitation_note(state["findings"])
+    if note:
+        payload["summary"] += "\n\n" + note  # LLM이 누락해도 최종 JSON·리포트에 반드시 남긴다.
     return {"result": {"eventType": "DIAGNOSIS_COMPLETED", "payload": payload}}
 
 
@@ -188,6 +198,9 @@ async def request_photo(state: State, config) -> dict:
     cmd = state["command"]
     payload = {"round": cmd["payload"]["round"] + 1, "bodyPart": "wheel",  # TODO: GPT가 부위·설명을 고른다
                "description": "결함 부위를 가까이에서 밝게 다시 찍어 주세요", "checkpoint": f"task-{cmd['taskId']}"}
+    note = limitation_note(state["findings"])
+    if note:
+        payload["description"] += "\n\n" + note
     return {"result": {"eventType": "PHOTO_REQUESTED", "payload": payload}}  # requestKey는 main.py가 붙인다
 
 

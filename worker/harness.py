@@ -10,6 +10,7 @@ from .observability import context, log_event
 from time import monotonic
 
 import httpx
+import httpx2
 from openai import APIConnectionError
 
 from . import config as C
@@ -44,13 +45,21 @@ def record(event, **fields):
     log_event(event, **(budget.context if budget else {}), **fields)
 
 
-def transient(exc):
+def transient(exc, seen=frozenset()):
+    if id(exc) in seen:
+        return False
+    seen = seen | {id(exc)}
     if isinstance(exc, BaseExceptionGroup):
-        return bool(exc.exceptions) and all(transient(e) for e in exc.exceptions)
+        return bool(exc.exceptions) and all(transient(e, seen) for e in exc.exceptions)
     status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
     if status in (429, 503):
         return True
-    return isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError, APIConnectionError))
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError,
+                        httpx2.TransportError, APIConnectionError)):
+        return True
+    # FastMCP는 접속 오류를 RuntimeError로 감싼다. 명시적 원인이 일시 오류일 때만 재시도한다.
+    return (isinstance(exc, RuntimeError) and exc.__cause__ is not None
+            and transient(exc.__cause__, seen))
 
 
 def guarded(weight=1):

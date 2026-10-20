@@ -49,6 +49,9 @@ def save(command: dict, result: dict) -> Path:
 
     else:
         lines += ["## 진단 실패", "", f"- 에러: {p['errorCode']}", "- 접수는 수동 검토로 넘어간다"]
+        if p["errorCode"] == "REQUIRED_TOOL_FAILED":
+            lines += ["- 필수 이미지 분석 도구가 실패했습니다. 결함 없음이나 정상 판정이 아닙니다.",
+                      "- 도구 상태를 복구한 뒤 재진단이 필요합니다."]
 
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"task-{command['taskId']}_revision-{command['inputRevision']}_고장리포트.md"
