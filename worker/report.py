@@ -1,10 +1,11 @@
 """진단 결과를 사람이 읽는 '고장 리포트.md'로 저장한다. (Spring에 보내는 JSON과 같은 내용)
 
-저장 위치: worker/reports/task-{taskId}_고장리포트.md
+저장 위치: worker/reports/task-{taskId}_revision-{revision}_고장리포트.md/json
 """
 
 from datetime import datetime
 from pathlib import Path
+import json
 
 from . import config as C
 
@@ -40,7 +41,7 @@ def save(command: dict, result: dict) -> Path:
                     lines += [f"![{Path(a['dentImage']).name}]({Path(a['dentImage']).as_uri()})", ""]
             else:
                 lines += [f"- {e['type']}: {e.get('citation', '')} {e.get('excerpt', '')}"]
-        lines += ["", "## 추천 부품", "", ", ".join(f"{x['partId']} ×{x['quantity']}" for x in p["recommendedParts"]) or "없음 (TODO)"]
+        lines += ["", "## 추천 부품", "", ", ".join(f"{x['partId']} ×{x['quantity']}" for x in p["recommendedParts"]) or "추천 부품 없음"]
 
     elif result["eventType"] == "PHOTO_REQUESTED":
         lines += ["## 추가 사진 요청", "", f"- {p['round']}회차 / 최대 {C.MAX_PHOTO_ROUNDS}회",
@@ -49,7 +50,9 @@ def save(command: dict, result: dict) -> Path:
     else:
         lines += ["## 진단 실패", "", f"- 에러: {p['errorCode']}", "- 접수는 수동 검토로 넘어간다"]
 
-    OUT.mkdir(exist_ok=True)
-    path = OUT / f"task-{command['taskId']}_고장리포트.md"
+    OUT.mkdir(parents=True, exist_ok=True)
+    path = OUT / f"task-{command['taskId']}_revision-{command['inputRevision']}_고장리포트.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps(
+        {"command": command, "result": result}, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     return path

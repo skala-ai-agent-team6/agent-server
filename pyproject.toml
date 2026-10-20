@@ -10,6 +10,9 @@ dependencies = [
     "langchain-openai>=1",
     "langgraph>=1,<2",
     "python-dotenv>=1",
+    "jsonschema>=4",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
 ]
 
 [dependency-groups]

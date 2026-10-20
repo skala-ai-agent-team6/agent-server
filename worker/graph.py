@@ -14,6 +14,8 @@ from langgraph.graph import END, START, StateGraph
 
 from . import config as C
 from . import tools
+from . import enrichment
+from .harness import LimitExceeded, observed
 
 
 class State(TypedDict, total=False):
@@ -35,9 +37,12 @@ async def emit(config, event_type: str, payload: dict):
 
 async def classify_photos(state: State, config) -> dict:
     await emit(config, "DIAGNOSIS_PROGRESS", {"stage": "CLASSIFYING_PHOTOS"})
-    photos = tools.load_photos(state["command"])  # Spring에서 받거나, 못 받으면 예시 2장
+    photos = await tools.load_photos(state["command"])
     for p in photos:
-        p["kind"] = await tools.classify_photo(p["path"])
+        # 이미 구분해 접수한 사진은 그 구분을 사용. GENERAL/미지정은 원본 GPT 분류 유지.
+        p["kind"] = {"PCB": "PCB", "MOTOR": "MECH", "MECHANICAL": "MECH"}.get(p.get("target"))
+        if p["kind"] is None:
+            p["kind"] = await tools.classify_photo(p["path"])
     return {"photos": photos}
 
 
@@ -50,7 +55,23 @@ async def split_text(state: State, config) -> dict:
     text = f"{repair.get('symptom') or ''} {repair.get('user_input', {}).get('customerDescription', '')}".strip()
     clues = (await tools.split_text(text)).model_dump()
     clues["errorCodes"] = repair.get("error_codes") or []
-    return {"text": text, "clues": clues}
+    observation = await supplemental(config, "normalize_observation", "observation-mcp",
+                                     lambda: enrichment.normalize_observation(text))
+    return {"text": text, "clues": clues, "findings": [observation]}
+
+
+async def supplemental(config, name, server, call):
+    """추가 해석은 근거만 보강한다. 성공/실패로 원본의 found 판단을 바꾸지 않는다."""
+    try:
+        out = await call()
+    except LimitExceeded:
+        raise
+    except Exception as exc:
+        out = {"error": type(exc).__name__}
+    await emit(config, "TOOL_EXECUTED", {"tool": name, "toolVersion": "1", "agentType": "RAG",
+                                        "mcpServer": server, "input": {}, "output": out})
+    return {"source": "INTERPRETATION", "attachmentId": None, "found": False,
+            "output": {"tool": name, **out}}
 
 
 # ── 3. MCP 고르기 + 호출 (동시에) ────────────────────────
@@ -73,11 +94,26 @@ async def run_photo_mcp(state, config, kind: str, call, tool: str, agent_type: s
     for p in [p for p in state["photos"] if p["kind"] == kind]:
         try:
             out = await call(p["path"])
+        except LimitExceeded:
+            raise
         except Exception as e:  # MCP 꺼짐 등. 멈추지 않고 '못 찾음'으로 넘긴다
-            out = {"error": str(e)[:200]}
+            out = {"error": type(e).__name__}
         await emit(config, "TOOL_EXECUTED", {"tool": tool, "toolVersion": "1", "agentType": agent_type,
                                              "mcpServer": server, "input": {"path": p["path"]}, "output": out})
         findings.append({"source": kind, "attachmentId": p["attachmentId"], "found": bool(out.get("is_defective")), "output": out})
+    if kind == "PCB":
+        labels = sorted({d["type"] for f in findings for d in f["output"].get("defects", [])})
+        if labels:
+            findings.append(await supplemental(config, "interpret_pcb", "pcb-mcp",
+                                                lambda: enrichment.interpret_pcb(labels)))
+    else:
+        # 일반 결함명은 유지하고, 모델이 반환한 원래 부위 라벨로 추가 해석한다.
+        labels = [label for f in findings for label in enrichment.dent_labels(f["output"])]
+        labels = [{"damage_type": kind, "part": part}
+                  for kind, part in dict.fromkeys((v["damage_type"], v["part"]) for v in labels)]
+        if labels:
+            findings.append(await supplemental(config, "interpret_damage", "damage-mcp",
+                                                lambda: enrichment.interpret_damage(labels)))
     return {"findings": findings}
 
 
@@ -97,8 +133,10 @@ async def rag_mcp(state: State, config) -> dict:
                          for d in f["output"].get("defects", [])})
     try:
         out = await tools.call_rag_mcp(text, pcb_labels)
+    except LimitExceeded:
+        raise
     except Exception as e:  # RAG 서버 꺼짐 등. 검색 없이 진행
-        out = {"hits": [], "error": str(e)[:200]}
+        out = {"hits": [], "error": type(e).__name__}
     await emit(config, "TOOL_EXECUTED", {"tool": "retrieve_repair_context", "toolVersion": "1", "agentType": "RAG",
                                          "mcpServer": "rag-mcp", "input": {"text": text, "pcbLabels": pcb_labels}, "output": out})
     return {"findings": [{"source": "RAG", "attachmentId": None, "found": False, "output": out}]}
@@ -125,7 +163,8 @@ async def judge(state: State, config) -> dict:
 
 
 async def report(state: State, config) -> dict:
-    r = await tools.write_report(state["text"], state["findings"])  # GPT는 글만 쓴다
+    parts = state["command"]["payload"]["repair"].get("product_snapshot", {}).get("compatibleParts", [])
+    r = await tools.write_report(state["text"], state["findings"], parts)
     candidates = [{"rank": i + 1, **c.model_dump()} for i, c in enumerate(r.candidates)]
     evidence = []  # 근거는 코드가 MCP 결과에서 직접 만든다 (GPT가 사진 번호를 지어내지 않게)
     for f in state["findings"]:
@@ -137,11 +176,11 @@ async def report(state: State, config) -> dict:
                 e["attachmentId"] = f["attachmentId"]
             evidence.append(e)
         if f["source"] == "RAG":
-            evidence += [{"type": "MANUAL" if h["kind"] == "LABEL" else "CASE",
+            evidence += [{"type": "MANUAL" if h["kind"] in ("LABEL", "REFERENCE") else "CASE",
                           **{k: v for k, v in h.items() if k != "kind"}} for h in f["output"]["hits"]]
     payload = {"summary": r.summary, "modelVersion": C.MODEL_VERSION, "repairMethod": r.repairMethod,
-               "candidates": candidates, "recommendedParts": [], "evidence": evidence}
-    # TODO: recommendedParts는 Spring DB에 있는 partId만 가능 → product_snapshot의 부품 목록에서 고른다
+               "candidates": candidates, "recommendedParts": [p.model_dump() for p in r.recommendedParts],
+               "evidence": evidence}
     return {"result": {"eventType": "DIAGNOSIS_COMPLETED", "payload": payload}}
 
 
@@ -162,7 +201,7 @@ async def fail(state: State, config) -> dict:
 def build_graph():
     g = StateGraph(State)
     for fn in (classify_photos, split_text, pcb_mcp, mech_mcp, rag_mcp, judge, report, request_photo, fail):
-        g.add_node(fn.__name__, fn)
+        g.add_node(fn.__name__, observed(fn))
 
     g.add_edge(START, "classify_photos")
     g.add_edge("classify_photos", "split_text")

@@ -28,7 +28,7 @@ DENT_REPO = os.getenv("DENT_REPO", "vineetsarpal/yolov11n-car-damage")
 DENT_FILE = os.getenv("DENT_FILE", "best.pt")
 DENT_MODEL = YOLO(hf_hub_download(DENT_REPO, DENT_FILE))
 # 찌그러짐 모델. 자동차 외판으로 학습돼서 원래 이름이 front-bumper-dent, Headlight-damage 같은 자동차 부위다.
-# 그대로 내보내면 GPT가 "자동차 얘기라 무시"해 버려서, 밖으로는 일반 결함명만 내보낸다 (모델 교체 전 임시).
+# 기존 표시용 일반 결함명은 유지한다. 해석 MCP에는 raw_label로 원래 부위명을 함께 전달한다.
 
 
 def plain_name(name: str) -> str:
@@ -106,10 +106,11 @@ def detect_dents(photo_id: str, conf: float = MIN_CONF) -> dict:
     path = find_photo(photo_id)
     with redirect_stdout(sys.stderr):
         r = DENT_MODEL.predict(str(path), conf=conf, iou=0.6, verbose=False)[0]
+    original_names = dict(r.names)
     r.names = {i: plain_name(n) for i, n in r.names.items()}  # 박스 그림에도 일반 이름만
 
     defects = [
-        {"type": r.names[int(c)], "confidence": round(float(s), 3), "box_xyxy": [round(v) for v in b.tolist()]}
+        {"type": r.names[int(c)], "raw_label": original_names[int(c)], "confidence": round(float(s), 3), "box_xyxy": [round(v) for v in b.tolist()]}
         for c, s, b in zip(r.boxes.cls, r.boxes.conf, r.boxes.xyxy)
     ]
     counts = {}

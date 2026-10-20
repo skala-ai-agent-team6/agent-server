@@ -1,6 +1,7 @@
 """그래프가 쓰는 '팔다리': 사진 받기, MCP 호출, GPT 호출. graph.py는 이 함수들만 부른다."""
 
 import base64
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -9,37 +10,44 @@ from typing import Literal
 import httpx
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import config as C
+from .harness import guarded
 
 # ── 1. 사진 ──────────────────────────────────────────────
 
 
-def load_photos(command: dict) -> list[dict]:
-    """Spring에서 첨부 사진을 받아 로컬 파일로 저장한다. 하나라도 못 받으면 예시 사진 2장을 쓴다.
-
-    돌려주는 값: [{"attachmentId": "1" 또는 None(예시), "path": "/tmp/.../1.jpg"}]
-    """
+async def load_photos(command: dict) -> list[dict]:
+    """접수 사진만 내려받는다. 누락·다운로드 오류를 예시 사진으로 대체하지 않는다."""
     folder = Path(tempfile.mkdtemp(prefix=f"task{command['taskId']}_"))
-    try:
-        photos = []
+    photos = []
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         for a in command["payload"]["attachments"]:
-            r = httpx.get(C.SPRING_URL + a["downloadPath"], headers={"Authorization": f"Bearer {C.SPRING_TOKEN}"}, timeout=10)
-            r.raise_for_status()
+            if a["downloadPath"] != f"/internal/attachments/{a['id']}":
+                raise ValueError("Invalid attachment download path")
+            content = bytearray()
+            async with client.stream("GET", C.SPRING_URL.rstrip("/") + a["downloadPath"],
+                                     headers={"Authorization": f"Bearer {C.SPRING_TOKEN}"}) as r:
+                r.raise_for_status()
+                async for chunk in r.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > min(a["byte_size"], 20_000_000):
+                        raise ValueError("Attachment exceeds expected size")
+            if len(content) != a["byte_size"] or hashlib.sha256(content).hexdigest() != a["sha256"]:
+                raise ValueError("Attachment size or checksum mismatch")
             path = folder / f"{a['id']}.jpg"
-            path.write_bytes(r.content)
-            photos.append({"attachmentId": a["id"], "path": str(path)})
-        if photos:
-            return photos
-    except Exception:
-        pass
-    return [{"attachmentId": None, "path": p} for p in C.SAMPLE_PHOTOS]
+            path.write_bytes(content)
+            photos.append({"attachmentId": a["id"], "path": str(path), "target": a.get("target")})
+    if not photos:
+        raise ValueError("No intake photos supplied")
+    return photos
 
 
 # ── 2. MCP ───────────────────────────────────────────────
 
 
+@guarded(weight=2)
 async def call_mech_mcp(path: str) -> dict:
     """mechanical-mcp: 표면 결함(scratches, patches 등) + 찌그러짐(dent, breakage)을 둘 다 보고 합친다."""
     async with Client(C.MECH_MCP_URL) as c:
@@ -51,9 +59,11 @@ async def call_mech_mcp(path: str) -> dict:
         "defect_counts": {**surface["defect_counts"], **dent["defect_counts"]},
         "annotated_image": surface["annotated_image"],
         "dent_image": dent["annotated_image"],
+        "damage_labels": surface.get("damage_labels", []) + dent.get("damage_labels", []),
     }
 
 
+@guarded()
 async def call_pcb_mcp(path: str) -> dict:
     """pcb-detector (MCP_Error_check/pcb_agent): PCB 결함 (short, missing_hole 등)."""
     transport = StdioTransport(command=C.PCB_MCP_PYTHON, args=[C.PCB_MCP_SERVER], log_file=C.HERE / "pcb_mcp.log")
@@ -63,6 +73,7 @@ async def call_pcb_mcp(path: str) -> dict:
         return json.loads(r.content[0].text)  # 옛 mcp 1.x 서버라 결과가 글(JSON 문자열)로 온다
 
 
+@guarded()
 async def call_rag_mcp(text: str, pcb_labels: list[str]) -> dict:
     """Rag_mcp(retrieve_repair_context): 증상 글 + PCB 라벨로 과거 수리 사례·라벨 정의를 찾는다.
 
@@ -76,7 +87,11 @@ async def call_rag_mcp(text: str, pcb_labels: list[str]) -> dict:
     hits = [{"kind": "CASE", "citation": x["source_id"], "sourceUri": x["source_url"],
              "excerpt": (x.get("korean_summary") or x.get("chunk_text") or "")[:300]} for x in d["repair_cases"]]
     hits += [{"kind": "LABEL", "citation": x["document_id"], "excerpt": x["title"]} for x in d["label_definitions"]]
-    return {"hits": hits, "status": d["case_search_status"]}  # GPT·Spring에 보낼 만큼만 줄인다
+    hits += [{"kind": "REFERENCE", "citation": x["document_id"],
+              "excerpt": (x.get("text") or x.get("chunk_text") or x.get("title") or "")[:2000],
+              **({"sourceUri": x["source_url"]} if x.get("source_url") else {})}
+             for x in d.get("pcb_references", [])]
+    return {"hits": hits, "status": d["case_search_status"], "warnings": d.get("warnings", [])}
 
 
 # ── 3. GPT ───────────────────────────────────────────────
@@ -97,19 +112,40 @@ class Candidate(BaseModel):
     confidence: float = Field(ge=0, le=1)
     explanation: str = Field(description="근거가 된 MCP 결과를 들어 설명")
 
+    @field_validator("cause", "explanation")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("Candidate text must not be blank")
+        return value
+
+
+class RecommendedPart(BaseModel):
+    partId: str = Field(pattern=r"^[1-9][0-9]*$")
+    quantity: int = Field(ge=1, le=100)
+
 
 class Report(BaseModel):
     summary: str
     repairMethod: str
     candidates: list[Candidate] = Field(min_length=1)
+    recommendedParts: list[RecommendedPart] = Field(default_factory=list, max_length=20)
+
+    @field_validator("summary", "repairMethod")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("Report text must not be blank")
+        return value
 
 
 def gpt(schema):
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(model=C.GPT_MODEL, temperature=0).with_structured_output(schema)
+    return ChatOpenAI(model=C.GPT_MODEL, temperature=0, timeout=C.TOOL_TIMEOUT, max_retries=0).with_structured_output(schema)
 
 
+@guarded()
 async def classify_photo(path: str) -> str:
     """사진 한 장이 PCB / MECH / OTHER 중 무엇인지."""
     if not C.USE_GPT:
@@ -122,6 +158,7 @@ async def classify_photo(path: str) -> str:
     return (await gpt(PhotoKind).ainvoke(msg)).kind
 
 
+@guarded()
 async def split_text(text: str) -> Clues:
     """증상 문장을 PCB / 기계 / SW 단서로 나눈다."""
     if not C.USE_GPT:
@@ -131,14 +168,23 @@ async def split_text(text: str) -> Clues:
     return await gpt(Clues).ainvoke(f"로봇청소기 고장 증상을 단서별로 나눠라. 없으면 빈 목록.\n증상: {text}")
 
 
-async def write_report(text: str, findings: list[dict]) -> Report:
+@guarded()
+async def write_report(text: str, findings: list[dict], compatible_parts=None) -> Report:
     """MCP 결과를 근거로 진단 리포트를 쓴다."""
     defects = [d for f in findings for d in f["output"].get("defects", [])]
     if not C.USE_GPT:
         top = max(defects, key=lambda d: d["confidence"])
         return Report(summary=f"{top['type']} 결함 추정", repairMethod="해당 부품 점검 후 교체",
                       candidates=[Candidate(cause=top["type"], confidence=top["confidence"], explanation="MCP 검출 결과")])
-    return await gpt(Report).ainvoke(
+    result = await gpt(Report).ainvoke(
         "로봇청소기 수리 기사에게 줄 진단 리포트를 한국어로 써라. 후보는 확신도 높은 순.\n"
         "MCP 결과는 전부 이 로봇청소기 부품 사진을 검사한 결과다. 무시하지 말고 근거로 써라.\n"
-        f"증상: {text}\nMCP 결과: {findings}")
+        "단, 해석 MCP가 도메인 불일치로 표시한 자동차 부위는 청소기의 부위·고장 원인으로 제시하지 마라. "
+        "모델 검출 점수나 RAG 유사도는 실제 고장 확률이 아니다. 원인 확정에는 추가 점검이 필요하다고 명시하라.\n"
+        "추천 부품은 제공된 호환 부품의 id만 사용하라. 목록이 없거나 교체 근거가 없으면 빈 배열.\n"
+        f"호환 부품: {compatible_parts or []}\n증상: {text}\nMCP 결과: {findings}")
+    allowed = {str(p["id"]) for p in compatible_parts or []}
+    identifiers = [p.partId for p in result.recommendedParts]
+    if not set(identifiers) <= allowed or len(set(identifiers)) != len(identifiers):
+        raise ValueError("Unknown or duplicate recommended part")
+    return result

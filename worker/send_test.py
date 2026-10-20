@@ -1,12 +1,14 @@
 """Spring 없이 시험: Spring인 척 명령 1개를 Kafka에 넣고, 워커가 보낸 결과를 받아 계약(JSON Schema)으로 검사한다.
 
-순서는 README.md 참고
-Spring이 없으니 사진은 예시 2장(PCB 1, 기계 1)이 쓰인다.
+실제 다운로드 가능한 첨부 ID·크기·해시로 COMMAND를 수정해야 한다.
+Spring 없이 실제 모델만 확인할 때는 worker.verify_live를 사용한다.
 """
 
 import asyncio
 import json
 import uuid
+import hashlib
+from pathlib import Path
 
 import jsonschema
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -15,7 +17,7 @@ from . import config as C
 
 SCHEMA = json.loads((C.ROOT / "contract/kafka-event.schema.json").read_text())  # Spring 팀이 만든 계약
 FINAL = ("DIAGNOSIS_COMPLETED", "PHOTO_REQUESTED", "DIAGNOSIS_FAILED")
-TASK_ID = "900"
+TASK_ID = str(uuid.uuid4().int % 100000000 + 1)
 
 COMMAND = {  # contract/kafka-examples.json 첫 번째 예시와 같은 모양
     "eventId": str(uuid.uuid4()), "eventType": "DIAGNOSIS_REQUESTED", "schemaVersion": 2,
@@ -26,7 +28,10 @@ COMMAND = {  # contract/kafka-examples.json 첫 번째 예시와 같은 모양
                    "symptom": "충전이 안 되고 바퀴 모터에서 소음", "error_codes": ["E05"], "firmware_version": "1.2",
                    "user_input": {"customerDescription": "펌웨어 업데이트 후부터 그렇다고 함"}},
         "task": {"id": TASK_ID},
-        "attachments": [{"id": "1", "request_id": None, "mime_type": "image/jpeg", "downloadPath": "/internal/attachments/1"}],
+        "attachments": [{"id": "1", "request_id": None, "mime_type": "image/jpeg",
+                         "byte_size": Path(C.SAMPLE_PHOTOS[0]).stat().st_size,
+                         "sha256": hashlib.sha256(Path(C.SAMPLE_PHOTOS[0]).read_bytes()).hexdigest(),
+                         "downloadPath": "/internal/attachments/1"}],
         "attachmentIds": ["1"], "addedAttachmentIds": [], "requestId": None, "requestKey": None,
         "round": 0, "checkpoint": None,
     },
