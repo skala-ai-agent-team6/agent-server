@@ -2,41 +2,42 @@ from time import monotonic
 from typing import TypedDict
 from uuid import uuid4
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import interrupt
 from app.adapters import AnalysisTools
+from app.models import DiagnosisReport
+
 
 class State(TypedDict, total=False):
     request: dict
     status: str
-    workflow_status: str
     selected: list[str]
     results: list[dict]
-    candidates: list[dict]
+    report: dict | None
     executions: list[dict]
     photo_request_count: int
     tool_call_count: int
     retry_count: int
     missing: list[str]
     error_code: str | None
-    order: dict | None
+    outgoing_event: dict | None
+
 
 class BudgetExceeded(Exception):
     pass
 
 
-def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2, active_seconds=120):
+def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2,
+                active_seconds=120, confidence_threshold=0.5):
+    if max_calls < 1 or max_retries < 0 or active_seconds <= 0 or not 0 <= confidence_threshold <= 1:
+        raise ValueError("Invalid execution limits")
+
     def route(state):
         req = state["request"]
-        # 첫 버전의 결정적 라우터. 이후 LLM structured output으로 교체한다.
+        # 입력 부위는 기사에게 받는다. 사진 종류를 LLM으로 재분류하지 않는다.
+        # 자연어 단서 추출은 임시 키워드 규칙이며 이후 구조화 출력으로 교체한다.
         selected = {a["target"] for a in req["attachments"]}
-        if req["error_codes"] or any(w in req["symptom"].lower() for w in ("sw", "펌웨어", "업데이트")):
+        if any(w in req["symptom"].lower() for w in ("sw", "펌웨어", "업데이트", "소프트웨어")):
             selected.add("SW")
-        if any(w in req["symptom"].lower() for w in ("모터", "바퀴", "motor")):
-            selected.add("MOTOR")
-        if any(w in req["symptom"].lower() for w in ("pcb", "보드", "기판")):
-            selected.add("PCB")
-        return {"selected": sorted(selected or {"PCB", "MOTOR", "SW"}), "status": "RUNNING"}
+        return {"selected": sorted(selected), "status": "RUNNING"}
 
     def analyze(state):
         calls, retries = state["tool_call_count"], state["retry_count"]
@@ -52,7 +53,7 @@ def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2, active_second
                     raise BudgetExceeded()
                 calls += 1
                 record = {"call_key": call_key, "tool_name": name, "attempt": attempt,
-                          "task_id": state["request"]["task_id"]}
+                          "task_id": state["request"]["task_id"], "event_id": state["request"]["event_id"]}
                 try:
                     value = fn()
                     if monotonic() - started >= active_seconds:
@@ -68,62 +69,72 @@ def build_graph(tools: AnalysisTools, max_calls=24, max_retries=2, active_second
         try:
             for domain in state["selected"]:
                 results.append(invoke(f"analyze_{domain.lower()}", lambda d=domain: tools.analyze(d, state["request"])))
-            missing = [r["domain"] for r in results if not r["sufficient"]]
-            candidates = []
+            missing = [r["domain"] for r in results
+                       if not r["sufficient"] or r["confidence"] < confidence_threshold]
+            if not results:
+                missing = ["GENERAL"]
+            report = None
             if not missing:
                 sources = invoke("search_manual", lambda: tools.search(state["request"]["symptom"]))
-                candidates = [{"rank": i+1, "cause_code": f"MOCK_{r['domain']}",
-                               "cause_description": r["finding"], "evidence": {"analysis": r, "manuals": sources},
-                               "repair_guide": "[MOCK] 담당 기사 확인 후 점검·수리", "part_id": None}
-                              for i, r in enumerate(results)]
-            return {"results": results, "missing": missing, "candidates": candidates,
+                # 실제 LLM with_structured_output 연결 전 Pydantic 출력 검증.
+                report = DiagnosisReport.model_validate({
+                    "task_id": state["request"]["task_id"], "case_id": state["request"]["case_id"],
+                    "candidates": [{"rank": i+1, "cause_code": f"MOCK_{r['domain']}",
+                                    "cause_description": r["finding"], "confidence": r["confidence"],
+                                    "evidence": {"photo_ids": r["evidence_ids"], "manuals": sources,
+                                                 "finding": r["finding"]},
+                                    "repair_guide": "[MOCK] 담당 기사 확인 후 점검·수리",
+                                    "annotated_image": r.get("annotated_image")}
+                                   for i, r in enumerate(results)]
+                }).model_dump()
+            return {"results": results, "missing": missing, "report": report,
                     "executions": executions, "tool_call_count": calls, "retry_count": retries}
         except (TimeoutError, ConnectionError, BudgetExceeded) as exc:
-            return {"status": "FAILED", "workflow_status": "DONE", "error_code": type(exc).__name__,
+            return {"status": "FAILED", "error_code": type(exc).__name__, "report": None,
                     "executions": executions, "tool_call_count": calls, "retry_count": retries}
 
     def next_step(state):
         if state["status"] == "FAILED":
-            return END
+            return "failed"
         if state["missing"]:
-            return "failed" if state["photo_request_count"] >= 3 else "request_photo"
-        return "diagnosed"
+            return "failed" if state["photo_request_count"] >= 3 else "request_input"
+        return "complete"
 
-    def request_photo(state):
-        return {"photo_request_count": state["photo_request_count"] + 1, "status": "WAITING_INPUT"}
+    def event(state, kind, payload):
+        return {"event_id": f"{state['request']['event_id']}:{kind}", "event_type": kind,
+                "task_id": state["request"]["task_id"], "case_id": state["request"]["case_id"],
+                "payload": payload}
 
-    def wait_photo(state):
-        # interrupt 앞에 외부 쓰기나 횟수 증가를 두지 않는다. 재개 시 노드가 재실행된다.
-        submission = interrupt({"type": "PHOTO_REQUESTED", "round_no": state["photo_request_count"],
-                                "targets": state["missing"], "instruction": "해당 부위 전체와 커넥터를 선명하게 촬영해주세요."})
-        request = {**state["request"], "attachments": state["request"]["attachments"] + submission["attachments"]}
-        return {"request": request, "status": "RUNNING"}
+    def request_input(state):
+        count = state["photo_request_count"] + 1
+        instructions = {
+            "PCB": "PCB 기판 전체와 결함 의심 부위를 선명하게 촬영해주세요.",
+            "MECHANICAL": "찌그러짐 등 의심 부위의 전체와 근접 사진을 제출해주세요.",
+            "SW": "증상 발생 시점·업데이트 여부·재현 절차를 추가로 설명해주세요.",
+            "GENERAL": "분석할 부위의 사진과 구체적인 증상을 추가해주세요.",
+        }
+        return {"photo_request_count": count, "status": "WAITING_INPUT",
+                "outgoing_event": event(state, "ADDITIONAL_INPUT_REQUESTED", {
+                    "round_no": count, "targets": state["missing"],
+                    "instructions": [instructions[d] for d in state["missing"]]})}
 
-    def diagnosed(state):
-        return {"status": "SUCCEEDED", "workflow_status": "DONE"}
+    def complete(state):
+        return {"status": "SUCCEEDED", "outgoing_event": event(state, "DIAGNOSIS_COMPLETED", {"report": state["report"]})}
 
-    def propose(state):
-        return {"workflow_status": "WAITING_APPROVAL", "order": {
-            "id": f"mock-order-{state['request']['task_id']}", "status": "PENDING",
-            "description": "[MOCK] 부품 발주안. 실제 부품·수량 조회 미연결"}}
-
-    def approval(state):
-        decision = interrupt({"type": "APPROVAL_REQUIRED", "order": state["order"]})
-        return {"order": {**state["order"], "status": "ORDERED" if decision["approved"] else "REJECTED"},
-                "workflow_status": "DONE"}
+    def failed(state):
+        code = state["error_code"] or "PHOTO_LIMIT"
+        return {"status": "FAILED", "error_code": code,
+                "outgoing_event": event(state, "DIAGNOSIS_FAILED", {
+                    "error_code": code, "manual_review_required": True})}
 
     graph = StateGraph(State)
-    for name, fn in [("route", route), ("analyze", analyze), ("request_photo", request_photo),
-                     ("wait_photo", wait_photo), ("diagnosed", diagnosed), ("propose", propose), ("approval", approval)]:
+    for name, fn in [("route", route), ("analyze", analyze), ("request_input", request_input),
+                     ("complete", complete), ("failed", failed)]:
         graph.add_node(name, fn)
-    graph.add_node("failed", lambda s: {"status": "FAILED", "workflow_status": "DONE", "error_code": "PHOTO_LIMIT"})
     graph.add_edge(START, "route")
     graph.add_edge("route", "analyze")
     graph.add_conditional_edges("analyze", next_step)
-    graph.add_edge("request_photo", "wait_photo")
-    graph.add_edge("wait_photo", "route")
-    graph.add_conditional_edges("diagnosed", lambda s: "propose" if s["request"]["mock_order_required"] else END)
-    graph.add_edge("propose", "approval")
-    graph.add_edge("approval", END)
-    graph.add_edge("failed", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    for name in ("request_input", "complete", "failed"):
+        graph.add_edge(name, END)
+    # 이벤트 하나당 끝까지 실행하고 종료한다. interrupt/체크포인트 재개 없음.
+    return graph.compile()

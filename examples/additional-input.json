@@ -1,0 +1,12 @@
+{
+  "event_id": "additional-demo-1-round-1",
+  "event_type": "ADDITIONAL_INPUT_SUBMITTED",
+  "task_id": "demo-1",
+  "case_id": "100",
+  "round_no": 1,
+  "symptom": "왼쪽 바퀴가 움직이지 않습니다. 연결 부위를 추가 촬영했습니다.",
+  "attachments": [
+    {"photo_id": "photo-1", "target": "MECHANICAL", "mock_readable": true, "mock_confidence": 0.2},
+    {"photo_id": "photo-2", "target": "MECHANICAL", "mock_readable": true, "mock_confidence": 0.9}
+  ]
+}

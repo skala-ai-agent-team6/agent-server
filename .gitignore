@@ -4,3 +4,6 @@ __pycache__/
 .env
 *.pyc
 .DS_Store
+.local/
+*.sqlite3
+*.sqlite3-journal

@@ -1,0 +1,629 @@
+{
+  "type": "object",
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "DIAGNOSIS_REQUESTED",
+        "DIAGNOSIS_RESUMED",
+        "DIAGNOSIS_STARTED",
+        "DIAGNOSIS_PROGRESS",
+        "TOOL_EXECUTED",
+        "PHOTO_REQUESTED",
+        "DIAGNOSIS_COMPLETED",
+        "DIAGNOSIS_FAILED"
+      ]
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repairId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "inputRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "executionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "eventId",
+    "eventType",
+    "schemaVersion",
+    "occurredAt",
+    "repairId",
+    "taskId",
+    "correlationId",
+    "inputRevision",
+    "executionId",
+    "sequence",
+    "payload"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:robot-repair:kafka:v2",
+  "title": "Robot repair Kafka envelope v2",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_REQUESTED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "repair": {
+                "type": "object"
+              },
+              "task": {
+                "type": "object"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]*$"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "mime_type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "byte_size": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "downloadPath": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "request_id",
+                    "mime_type",
+                    "byte_size",
+                    "sha256",
+                    "downloadPath"
+                  ]
+                }
+              },
+              "attachmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "addedAttachmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "requestId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "requestKey": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "checkpoint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "repair",
+              "task",
+              "attachments",
+              "attachmentIds",
+              "addedAttachmentIds",
+              "requestId",
+              "requestKey",
+              "round",
+              "checkpoint"
+            ]
+          },
+          "sequence": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_RESUMED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "repair": {
+                "type": "object"
+              },
+              "task": {
+                "type": "object"
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]*$"
+                    },
+                    "request_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "mime_type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "byte_size": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "downloadPath": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "request_id",
+                    "mime_type",
+                    "byte_size",
+                    "sha256",
+                    "downloadPath"
+                  ]
+                }
+              },
+              "attachmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "addedAttachmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "requestId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "requestKey": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "checkpoint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "repair",
+              "task",
+              "attachments",
+              "attachmentIds",
+              "addedAttachmentIds",
+              "requestId",
+              "requestKey",
+              "round",
+              "checkpoint"
+            ]
+          },
+          "sequence": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_STARTED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "stage": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "stage"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_PROGRESS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "stage": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "stage"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "TOOL_EXECUTED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string",
+                "minLength": 1
+              },
+              "toolVersion": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "tool",
+              "toolVersion"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "PHOTO_REQUESTED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "requestKey": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "bodyPart": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "checkpoint": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "requestKey",
+              "round",
+              "bodyPart",
+              "description",
+              "checkpoint"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_COMPLETED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "modelVersion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "repairMethod": {
+                "type": "string",
+                "minLength": 1
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "rank": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "cause": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "explanation": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "rank",
+                    "confidence",
+                    "cause",
+                    "explanation"
+                  ]
+                },
+                "minItems": 1
+              },
+              "recommendedParts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "partId": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]*$"
+                    },
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "partId",
+                    "quantity"
+                  ]
+                }
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attachmentId": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]*$"
+                    },
+                    "annotation": {
+                      "type": "object"
+                    },
+                    "citation": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "summary",
+              "modelVersion",
+              "repairMethod",
+              "candidates",
+              "recommendedParts",
+              "evidence"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "DIAGNOSIS_FAILED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "errorCode": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "errorCode"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}
